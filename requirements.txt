@@ -1,32 +1,28 @@
-# Core dependencies
+# ─── Core Dependencies ────────────────────────────────────────────────────────
 opencv-python>=4.8.1.78
 numpy==1.26.4
-pandas>=2.2.1
 yt-dlp>=2024.10.22
+psutil>=5.9.8
 
-# Web framework
+# ─── Web Framework & Networking ──────────────────────────────────────────────
 fastapi>=0.109.2
 uvicorn>=0.27.1
 httpx>=0.27.0
+python-multipart>=0.0.9
 
-# Database
+# ─── Database & Storage ──────────────────────────────────────────────────────
 sqlalchemy>=2.0.28,<3.0.0
 psycopg2-binary>=2.9.9
 sqlalchemy-utils>=0.42.0
-python-dotenv>=1.0.0
-python-multipart>=0.0.9
 chromadb>=0.5.0
 cloudinary>=1.36.0
 
-# AI/ML
+# ─── AI/ML Ecosystem ────────────────────────────────────────────────────────
 torch>=2.1.2
-transformers>=4.38.2
 torchvision>=0.16.1
-
-
-
-# Image processing
+transformers>=4.38.2
 pillow>=10.2.0
 
-# Auth
-passlib[bcrypt]>=1.7.4
+# ─── Security & Utils ────────────────────────────────────────────────────────
+python-dotenv>=1.0.0
+passlib>=1.7.4

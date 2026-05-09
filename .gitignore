@@ -26,6 +26,7 @@ build/
 chroma_db/
 uploads/
 models/
+config/demo/
 data/processed/
 data/temp_clips/
 data/output/
