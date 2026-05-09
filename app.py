@@ -368,9 +368,17 @@ app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 from concurrent.futures import ThreadPoolExecutor as _TPE
 _IO_POOL = _TPE(max_workers=64, thread_name_prefix="surveilx-io")
 
+# ── High-Priority Admin Pool: Reserved for UI-driven CRUD (Cameras, Users, Settings) ──
+# This ensures that admin changes are processed immediately, even if the IO_POOL is saturated with frame uploads.
+_ADMIN_POOL = _TPE(max_workers=16, thread_name_prefix="surveilx-admin")
+
 def _run_in_pool(fn, *args):
     """Submit fn(*args) to the shared I/O pool; returns a concurrent.futures.Future."""
     return _IO_POOL.submit(fn, *args)
+
+def _run_admin(fn, *args):
+    """Submit fn(*args) to the high-priority admin pool."""
+    return _ADMIN_POOL.submit(fn, *args)
 
 def _refresh_cameras_from_db():
     """Load cameras from DB, update CameraManager sources, and align running capture/tasks."""
@@ -865,7 +873,8 @@ async def admin_create_user(payload: dict[str, str], role: str = Depends(require
     if not username or not password:
         raise HTTPException(status_code=400, detail="username and password required")
     try:
-        u = db_manager.create_user(username, password, role=urole)
+        loop = asyncio.get_running_loop()
+        u = await loop.run_in_executor(_ADMIN_POOL, db_manager.create_user, username, password, urole)
         return {"ok": True, "user": {"username": u.username, "role": u.role}}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -879,11 +888,18 @@ async def admin_reset_password(payload: Dict[str, str], role: str = Depends(requ
     sess = db_manager.get_session()
     try:
         from src.metadata.models import AuthUser
-        u = sess.query(AuthUser).filter(AuthUser.username == username).first()
-        if not u:
+        def _reset():
+            u = sess.query(AuthUser).filter(AuthUser.username == username).first()
+            if not u:
+                return None
+            u.password_hash = db_manager._pwd.hash(new_password)
+            sess.commit()
+            return True
+        
+        loop = asyncio.get_running_loop()
+        res = await loop.run_in_executor(_ADMIN_POOL, _reset)
+        if res is None:
             raise HTTPException(status_code=404, detail="user not found")
-        u.password_hash = db_manager._pwd.hash(new_password)
-        sess.commit()
         return {"ok": True}
     finally:
         sess.close()
@@ -1016,7 +1032,11 @@ async def admin_create_camera(payload: Dict, role: str = Depends(require_admin))
         except Exception:
             embed_fps = 15.0
 
-    cam = db_manager.create_camera(name=name, source_url=source_url, zone=zone, enabled=enabled, embed_fps=embed_fps)
+    loop = asyncio.get_running_loop()
+    cam = await loop.run_in_executor(_ADMIN_POOL, lambda: db_manager.create_camera(
+        name=name, source_url=source_url, zone=zone, enabled=enabled, embed_fps=embed_fps
+    ))
+
     # reflect source and embed_fps in runtime maps; start capture if enabled (embeddings lazy)
     try:
         cam_manager.set_source(cam.id, cam.source_url)
@@ -1040,12 +1060,16 @@ async def admin_update_camera(camera_id: int, payload: Dict, role: str = Depends
     # Track old source to detect changes
     old_source = cam_manager.get_source(cid)
 
-    cam = db_manager.update_camera(camera_id,
-                                   name=payload.get("name"),
-                                   source_url=payload.get("source_url"),
-                                   zone=payload.get("zone"),
-                                   enabled=payload.get("enabled"),
-                                   embed_fps=payload.get("embed_fps"))
+    loop = asyncio.get_running_loop()
+    cam = await loop.run_in_executor(_ADMIN_POOL, lambda: db_manager.update_camera(
+        camera_id,
+        name=payload.get("name"),
+        source_url=payload.get("source_url"),
+        zone=payload.get("zone"),
+        enabled=payload.get("enabled"),
+        embed_fps=payload.get("embed_fps")
+    ))
+    
     if not cam:
         raise HTTPException(status_code=404, detail="camera not found")
     
@@ -1093,7 +1117,8 @@ async def admin_update_camera(camera_id: int, payload: Dict, role: str = Depends
 
 @app.delete("/admin/cameras/{camera_id}")
 async def admin_delete_camera(camera_id: int, role: str = Depends(require_admin)):
-    ok = db_manager.delete_camera(camera_id)
+    loop = asyncio.get_running_loop()
+    ok = await loop.run_in_executor(_ADMIN_POOL, db_manager.delete_camera, camera_id)
     if not ok:
         raise HTTPException(status_code=404, detail="camera not found")
     # reflect in runtime
@@ -1188,11 +1213,18 @@ async def admin_delete_user(payload: Dict[str, str], role: str = Depends(require
     sess = db_manager.get_session()
     try:
         from src.metadata.models import AuthUser
-        u = sess.query(AuthUser).filter(AuthUser.username == username).first()
-        if not u:
+        def _delete():
+            u = sess.query(AuthUser).filter(AuthUser.username == username).first()
+            if not u:
+                return False
+            sess.delete(u)
+            sess.commit()
+            return True
+            
+        loop = asyncio.get_running_loop()
+        ok = await loop.run_in_executor(_ADMIN_POOL, _delete)
+        if not ok:
             raise HTTPException(status_code=404, detail="user not found")
-        sess.delete(u)
-        sess.commit()
         # clean sessions too
         for tok, info in list(SESSIONS.items()):
             if info.get("username") == username:
@@ -1249,8 +1281,8 @@ async def admin_get_settings(role: str = Depends(require_admin)):
 
 @app.post("/api/admin/settings")
 async def admin_update_settings(payload: Dict[str, str], role: str = Depends(require_admin)):
-    for key, value in payload.items():
-        db_manager.set_setting(key, value)
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(_ADMIN_POOL, lambda: [db_manager.set_setting(k, v) for k, v in payload.items()])
     return {"ok": True}
 
 # -------- Embedding/Chroma stats endpoints --------

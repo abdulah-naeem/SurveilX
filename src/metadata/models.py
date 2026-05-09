@@ -23,7 +23,7 @@ class VideoStream(Base):
     # Legacy external camera identifier, retained for compatibility
     camera_id = Column(String(50), nullable=False)
     # New relational link to cameras.id (kept additive to avoid destructive change)
-    camera_pk = Column(Integer, ForeignKey("cameras.id"), nullable=True, index=True)
+    camera_pk = Column(Integer, ForeignKey("cameras.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at = Column(TIMESTAMP, server_default=func.now())
     status = Column(String(20), default="captured")
 
@@ -42,8 +42,8 @@ class Camera(Base):
     # Target frames-per-second for embedding/storage (per camera)
     embed_fps = Column(Integer, default=15)
 
-    streams = relationship("VideoStream", back_populates="camera", cascade="all, delete-orphan")
-    metadata_entries = relationship("VideoMetadata", back_populates="camera", cascade="all, delete-orphan")
+    streams = relationship("VideoStream", back_populates="camera")
+    metadata_entries = relationship("VideoMetadata", back_populates="camera")
 
 class GlobalSetting(Base):
     __tablename__ = "global_settings"
@@ -60,7 +60,7 @@ class VideoMetadata(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     video_stream_id = Column(Integer, ForeignKey("video_streams.id"), nullable=True)
     # Direct link to camera as well for easier querying/joins
-    camera_pk = Column(Integer, ForeignKey("cameras.id"), nullable=True, index=True)
+    camera_pk = Column(Integer, ForeignKey("cameras.id", ondelete="SET NULL"), nullable=True, index=True)
     frame_id = Column(String(200), unique=True, index=True, nullable=False)
     timestamp = Column(TIMESTAMP(timezone=True), nullable=False)
     camera_location = Column(String(100))

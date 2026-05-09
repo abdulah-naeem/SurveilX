@@ -208,13 +208,19 @@ class DatabaseManager:
     ):
         """
         Insert VideoStream + VideoMetadata in ONE transaction, ONE round-trip.
-        This replaces the old two-call pattern (insert_video_stream then insert_video_metadata).
         """
         session = self.get_session()
         try:
+            # Verify camera_pk exists if provided to prevent FK violation
+            if camera_pk is not None:
+                exists = session.query(Camera).filter(Camera.id == camera_pk).first()
+                if not exists:
+                    logger.warning(f"camera_pk {camera_pk} not found in DB for camera_id {camera_id}. Dropping PK to avoid FK violation.")
+                    camera_pk = None
+
             vs = VideoStream(camera_id=camera_id, camera_pk=camera_pk, status="captured")
             session.add(vs)
-            session.flush()  # populate vs.id in memory without a commit
+            session.flush()  # populate vs.id
 
             vm = VideoMetadata(
                 video_stream_id=vs.id,
@@ -230,10 +236,10 @@ class DatabaseManager:
                 camera_pk=camera_pk,
             )
             session.add(vm)
-            session.commit()   # Single network round-trip for both rows
-            # No refresh() — avoids an extra SELECT
-        except Exception:
+            session.commit()
+        except Exception as e:
             session.rollback()
+            logger.error(f"insert_frame_pipeline failed (camera_id={camera_id}, pk={camera_pk}): {e}")
             raise
         finally:
             session.close()
@@ -245,6 +251,11 @@ class DatabaseManager:
         """Legacy compat wrapper — still used from _op_db()."""
         session = self.get_session()
         try:
+            if camera_pk is not None:
+                exists = session.query(Camera).filter(Camera.id == camera_pk).first()
+                if not exists:
+                    camera_pk = None
+
             vm = VideoMetadata(
                 video_stream_id=video_stream_id,
                 frame_id=frame_id,
@@ -260,7 +271,10 @@ class DatabaseManager:
             )
             session.add(vm)
             session.commit()
-            # No refresh()
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Legacy insert_video_metadata failed: {e}")
+            raise
         finally:
             session.close()
 
@@ -549,8 +563,8 @@ class DatabaseManager:
             cam = session.query(Camera).get(camera_id)
             if not cam:
                 return False
-            session.query(VideoMetadata).filter(VideoMetadata.camera_pk == camera_id).delete(synchronize_session=False)
-            session.query(VideoStream).filter(VideoStream.camera_pk == camera_id).delete(synchronize_session=False)
+            # We no longer delete associated metadata/streams here.
+            # The 'ondelete=SET NULL' at the DB level preserves the history.
             session.delete(cam)
             session.commit()
             self._stats_invalidate()

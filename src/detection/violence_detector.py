@@ -273,6 +273,13 @@ class ViolenceDetector:
         # Extract spatial features from the current frame via CNN backbone
         frame_tensor, _ = self._preprocess_frame(frame_bgr)
         with torch.no_grad():
+            # Update rolling history with current frame's CNN features reduced to 240-dim
+            cnn_feat = self.model.cnn(frame_tensor)
+            temporal_feat = cnn_feat[0].view(240, -1).mean(dim=1) # [240]
+            
+            state["history"].pop(0)
+            state["history"].append(temporal_feat)
+
             # Run the full forward pass (CNN + LSTM history + FC)
             temporal_tensor = torch.stack(state["history"]).unsqueeze(0)  # [1, 16, 240]
             outputs = self.model(frame_tensor, temporal_tensor)
