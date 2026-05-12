@@ -62,7 +62,7 @@ graph TD
 ### 2. Installation
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/SurveilX.git
+git clone https://github.com/abdulah-naeem/SurveilX.git
 cd SurveilX
 
 # Create and activate virtual environment
