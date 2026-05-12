@@ -23,6 +23,10 @@ build/
 .vscode/
 
 # Project specific
+train/
+Report/
+report/
+scratch/
 chroma_db/
 uploads/
 models/

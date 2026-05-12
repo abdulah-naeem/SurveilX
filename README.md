@@ -1,4 +1,4 @@
-# 🛡️ SurveilX: AI-Powered Surveillance Ecosystem
+# 🛡️ SurveilX
 
 [![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
@@ -7,6 +7,8 @@
 [![Cloudinary](https://img.shields.io/badge/Storage-Cloudinary-blue)](https://cloudinary.com/)
 
 **SurveilX** is a next-generation surveillance dashboard that combines real-time computer vision, NLP-based semantic search, and high-performance video processing. Designed for scalability and speed, it transforms raw video feeds into actionable intelligence.
+
+> **Portfolio Note:** Developed collaboratively as part of university FYP.
 
 ---
 
