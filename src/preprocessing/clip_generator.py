@@ -75,7 +75,7 @@ def create_mp4_from_frames(frame_sources: list, output_path: str, fps: float = 1
     unique_sources = list(dict.fromkeys(frame_sources))
     frame_cache: dict = {}
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=40) as executor:
         futures = {executor.submit(_load_frame, src, width, height): src for src in unique_sources}
         for fut in concurrent.futures.as_completed(futures):
             src, frame = fut.result()

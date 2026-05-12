@@ -1653,18 +1653,27 @@ async def get_custom_video(camera_id: str, start_time: str, end_time: str, role:
             raise HTTPException(status_code=404, detail="No frames found in the specified custom range")
             
         span_sec = max(1, int((end_ts - start_ts).total_seconds()))
-        num_frames = len(paths)
-        video_fps = float(num_frames) / float(span_sec)
         
+        # Enforce highly efficient uniform down-sampling for massive temporal ranges
+        # to ensure blazing fast compilation and optimal bandwidth utilization
+        import numpy as np
+        max_allowed = 100
+        if len(paths) > max_allowed:
+            indices = np.linspace(0, len(paths) - 1, max_allowed, dtype=int)
+            paths = [paths[i] for i in indices]
+            
         final_paths = paths
-        if video_fps < 5.0 and num_frames > 0:
-            target_fps = 10.0
-            replications = max(1, int(round(target_fps / video_fps)))
-            video_fps = target_fps
+        # Set an elegant, rapid review playback frame-rate (timelapse format)
+        video_fps = max(5.0, min(float(len(final_paths)) / max(1.0, span_sec * 0.2), 15.0))
+        
+        # If very few frames are captured, replicate moderately so the clip lasts a few seconds
+        if len(final_paths) < 15:
+            replications = max(1, int(15 / max(1, len(final_paths))))
             final_paths = []
             for p in paths:
                 final_paths.extend([p] * replications)
-                
+            video_fps = 10.0
+            
         video_fps = max(1.0, min(video_fps, 30.0))
         
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
