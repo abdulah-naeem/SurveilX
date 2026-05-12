@@ -487,15 +487,22 @@ class DatabaseManager:
         try:
             start_ts = base_ts - timedelta(seconds=before_sec)
             end_ts   = base_ts + timedelta(seconds=after_sec)
+            from sqlalchemy import or_
+            q = session.query(VideoMetadata).join(VideoStream, VideoMetadata.video_stream_id == VideoStream.id)
+            try:
+                pk_val = int(camera_id)
+                q = q.filter(or_(VideoStream.camera_id == camera_id, VideoMetadata.camera_pk == pk_val))
+            except ValueError:
+                q = q.filter(VideoStream.camera_id == camera_id)
+                
             rows = (
-                session.query(VideoMetadata)
-                .join(VideoStream, VideoMetadata.video_stream_id == VideoStream.id)
-                .filter(VideoStream.camera_id == camera_id)
-                .filter(VideoMetadata.timestamp >= start_ts)
+                q.filter(VideoMetadata.timestamp >= start_ts)
                 .filter(VideoMetadata.timestamp <= end_ts)
                 .order_by(VideoMetadata.timestamp.asc(), VideoMetadata.id.asc())
                 .all()
             )
+            import os
+            cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME", "").strip()
             sources = []
             for r in rows:
                 md = r.metadata_json or {}
@@ -504,7 +511,49 @@ class DatabaseManager:
                 if cdn and cdn.startswith("http"):
                     sources.append(cdn)
                     continue
+                # Fallback deterministic URL if missing from early async save
+                if cloud_name and r.frame_id:
+                    fallback_cdn = f"https://res.cloudinary.com/{cloud_name}/image/upload/v1/surveilx/{camera_id}/{r.frame_id.replace(':', '_')}.jpg"
+                    sources.append(fallback_cdn)
+                    continue
                 # Fallback: local file path (legacy rows)
+                fp = md.get("file_path", "")
+                if fp:
+                    sources.append(fp)
+            return sources
+        finally:
+            session.close()
+
+    def get_frames_by_range(self, camera_id: str, start_ts: datetime, end_ts: datetime) -> list:
+        session = self.get_session()
+        try:
+            from sqlalchemy import or_
+            q = session.query(VideoMetadata).join(VideoStream, VideoMetadata.video_stream_id == VideoStream.id)
+            try:
+                pk_val = int(camera_id)
+                q = q.filter(or_(VideoStream.camera_id == camera_id, VideoMetadata.camera_pk == pk_val))
+            except ValueError:
+                q = q.filter(VideoStream.camera_id == camera_id)
+                
+            rows = (
+                q.filter(VideoMetadata.timestamp >= start_ts)
+                .filter(VideoMetadata.timestamp <= end_ts)
+                .order_by(VideoMetadata.timestamp.asc(), VideoMetadata.id.asc())
+                .all()
+            )
+            import os
+            cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME", "").strip()
+            sources = []
+            for r in rows:
+                md = r.metadata_json or {}
+                cdn = md.get("cloudinary_url", "")
+                if cdn and cdn.startswith("http"):
+                    sources.append(cdn)
+                    continue
+                if cloud_name and r.frame_id:
+                    fallback_cdn = f"https://res.cloudinary.com/{cloud_name}/image/upload/v1/surveilx/{camera_id}/{r.frame_id.replace(':', '_')}.jpg"
+                    sources.append(fallback_cdn)
+                    continue
                 fp = md.get("file_path", "")
                 if fp:
                     sources.append(fp)

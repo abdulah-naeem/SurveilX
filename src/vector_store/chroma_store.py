@@ -21,16 +21,22 @@ if CHROMA_PORT:
 
 logger.info(f"Chroma: connecting to remote at {RAILWAY_URL}")
 
-# Connect to Railway ChromaDB instance
-client = chromadb.HttpClient(
-    host=RAILWAY_URL,
-    headers={"Authorization": f"Bearer {CHROMA_TOKEN}"} if CHROMA_TOKEN else {}
-)
+# Connect to Railway ChromaDB instance lazily to prevent start-up crashes if offline
+_client = None
+
+def get_client():
+    global _client
+    if _client is None:
+        _client = chromadb.HttpClient(
+            host=RAILWAY_URL,
+            headers={"Authorization": f"Bearer {CHROMA_TOKEN}"} if CHROMA_TOKEN else {}
+        )
+    return _client
 
 COLLECTION_NAME = "video_frames"
 
 def get_collection():
-    return client.get_or_create_collection(
+    return get_client().get_or_create_collection(
         name=COLLECTION_NAME,
         metadata={"hnsw:space": "cosine"}
     )

@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException
 import secrets
 
 SESSIONS: Dict[str, Dict[str, str]] = {}
+DISABLED_AI_CAMERAS: Set[str] = set()
 
 app = FastAPI(title="SurveilX Web")
 
@@ -511,7 +512,15 @@ async def capture_worker(camera_id: str):
                 await asyncio.sleep(0.01)
                 continue
             detection = getattr(extractors[camera_id], 'last_detection', {})
-            if detector:
+            if str(camera_id) in DISABLED_AI_CAMERAS:
+                detection = {
+                    "label": "Normal",
+                    "score": 0.0,
+                    "is_alert": False,
+                    "class_probs": {"Normal": 1.0}
+                }
+                extractors[camera_id].last_detection = detection
+            elif detector:
                 last_yolo_ts = getattr(extractors[camera_id], 'last_yolo_ts', 0)
                 source_url = cam_manager.get_source(camera_id)
                 # If it's a demo patch video, bypass the throttle (Real-time scripting)
@@ -548,7 +557,8 @@ async def capture_worker(camera_id: str):
                     "score": detection.get("score"),
                     "class_probs": detection.get("class_probs"),
                     "ts": utc_iso(),
-                    "is_alert": detection.get("is_alert", False)
+                    "is_alert": detection.get("is_alert", False),
+                    "ai_enabled": str(camera_id) not in DISABLED_AI_CAMERAS
                 }
             except Exception:
                 pass
@@ -1148,6 +1158,23 @@ async def api_detections(role: str = Depends(require_any_role)):
     """Return latest detection per camera for dashboard."""
     return {"detections": {k: {kk: vv for kk, vv in v.items() if kk != "overlay_jpeg"} for k, v in DETECTIONS.items()}}
 
+@app.post("/api/cameras/{camera_id}/toggle_ai")
+async def toggle_camera_ai(camera_id: str, payload: Dict[str, Any], role: str = Depends(require_any_role)):
+    enable = payload.get("enabled", True)
+    cid = str(camera_id)
+    if enable:
+        DISABLED_AI_CAMERAS.discard(cid)
+    else:
+        DISABLED_AI_CAMERAS.add(cid)
+    if cid in DETECTIONS:
+        DETECTIONS[cid]["ai_enabled"] = enable
+        if not enable:
+            DETECTIONS[cid]["label"] = "Normal"
+            DETECTIONS[cid]["score"] = 0.0
+            DETECTIONS[cid]["is_alert"] = False
+            DETECTIONS[cid]["class_probs"] = {"Normal": 1.0}
+    return {"ok": True, "camera_id": cid, "ai_enabled": enable}
+
 # ---- Admin: Upload local video file for camera (store on server and return path) ----
 @app.post("/admin/upload_video")
 async def admin_upload_video(file: UploadFile = File(...), role: str = Depends(require_admin)):
@@ -1566,6 +1593,105 @@ async def get_video_clip(camera_id: str, timestamp: str, before: int = 5, after:
         raise
     except Exception as e:
         logger.error(f"Error generating clip: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/video/custom")
+async def get_custom_video(camera_id: str, start_time: str, end_time: str, role: str = Depends(require_any_role)):
+    try:
+        from src.preprocessing.clip_generator import create_mp4_from_frames
+        from datetime import datetime
+        import uuid
+        import os
+        
+        def parse_ts(ts_str):
+            from datetime import timezone
+            if ts_str.endswith('Z'):
+                return datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+            dt = datetime.fromisoformat(ts_str)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return dt
+
+        try:
+            start_ts = parse_ts(start_time)
+            end_ts = parse_ts(end_time)
+        except Exception as e:
+            logger.error(f"Custom timestamp parse error: {e}")
+            raise HTTPException(status_code=400, detail="Invalid start/end timestamp format")
+
+        from datetime import timezone
+        now_utc = utcnow().replace(tzinfo=timezone.utc)
+        if start_ts > now_utc or end_ts > now_utc:
+            raise HTTPException(status_code=400, detail="Requested end time cannot exceed the current live clock window.")
+            
+        loop = asyncio.get_running_loop()
+        paths = await loop.run_in_executor(None, db_manager.get_frames_by_range, camera_id, start_ts, end_ts)
+        
+        if not paths:
+            # Fallback for offline/local JPEG filenames
+            proc_dir = os.path.join(settings.BASE_DIR, "data", "processed")
+            def _find_orphaned_frames():
+                found = []
+                if os.path.isdir(proc_dir):
+                    for fname in os.listdir(proc_dir):
+                        if fname.startswith(f"{camera_id}_") and fname.endswith(".jpg"):
+                            parts = fname.split("_")
+                            if len(parts) >= 3:
+                                ts_str = f"{parts[-3]}_{parts[-2]}"
+                                try:
+                                    f_ts = datetime.strptime(ts_str, '%Y%m%d_%H%M%S').replace(tzinfo=timezone.utc)
+                                    if start_ts <= f_ts <= end_ts:
+                                        found.append(os.path.join(proc_dir, fname))
+                                except Exception: pass
+                    found.sort()
+                return found
+            paths = await loop.run_in_executor(None, _find_orphaned_frames)
+            
+        if not paths:
+            raise HTTPException(status_code=404, detail="No frames found in the specified custom range")
+            
+        span_sec = max(1, int((end_ts - start_ts).total_seconds()))
+        num_frames = len(paths)
+        video_fps = float(num_frames) / float(span_sec)
+        
+        final_paths = paths
+        if video_fps < 5.0 and num_frames > 0:
+            target_fps = 10.0
+            replications = max(1, int(round(target_fps / video_fps)))
+            video_fps = target_fps
+            final_paths = []
+            for p in paths:
+                final_paths.extend([p] * replications)
+                
+        video_fps = max(1.0, min(video_fps, 30.0))
+        
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        success = await loop.run_in_executor(None, create_mp4_from_frames, final_paths, tmp_path, video_fps)
+        if not success or not os.path.exists(tmp_path):
+            raise HTTPException(status_code=500, detail="Failed to build custom video")
+
+        clip_public_id = f"surveilx/clips/custom_{camera_id}_{uuid.uuid4().hex[:8]}"
+        try:
+            clip_bytes = open(tmp_path, "rb").read()
+            clip_url = await loop.run_in_executor(
+                None, _cloudinary_upload_video, clip_bytes, clip_public_id
+            )
+        finally:
+            try: os.unlink(tmp_path)
+            except Exception: pass
+
+        if not clip_url:
+            raise HTTPException(status_code=500, detail="Custom clip upload failed")
+
+        return RedirectResponse(url=clip_url, status_code=302)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating custom video: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 # ── Overview response cache: avoid hitting Neon on every 5s poll ─────────────

@@ -39,6 +39,7 @@ data/output/
 *.log
 *.sqlite
 *.db
+*.pdf
 
 # OS specific
 .DS_Store
