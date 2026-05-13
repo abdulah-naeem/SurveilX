@@ -30,19 +30,33 @@ class VideoCapture:
         self.frame_buffers = {}
         self.capture_threads = {}
         self.running = {}
+        self._lock = threading.RLock()
 
     def _capture_loop(self, camera_id, _initial_unused):
-        frame_queue = queue.Queue(maxsize=self.buffer_size)
-        self.frame_buffers[camera_id] = frame_queue
-        self.running[camera_id] = True
-        target = self.camera_manager.resolve_target(camera_id)
+        with self._lock:
+            frame_queue = self.frame_buffers.get(camera_id)
+            if not frame_queue:
+                frame_queue = queue.Queue(maxsize=self.buffer_size)
+                self.frame_buffers[camera_id] = frame_queue
+            self.running[camera_id] = True
+        try:
+            target = self.camera_manager.resolve_target(camera_id)
+        except Exception:
+            target = None
         logger.info(f"[VideoCapture] Started capture for {camera_id}")
 
         fail_count = 0          # consecutive open-failures
         read_fail_count = 0     # consecutive read-failures (for throttled logging)
 
         while self.running.get(camera_id, False):
-            target, api_pref = self.camera_manager.get_video_capture_args(camera_id)
+            try:
+                target, api_pref = self.camera_manager.get_video_capture_args(camera_id)
+            except Exception:
+                self.stop_capture(camera_id)
+                with self._lock:
+                    self.running[camera_id] = False
+                    self.capture_threads.pop(camera_id, None)
+                break
             cap = None
             try:
                 if api_pref is not None:
@@ -73,7 +87,11 @@ class VideoCapture:
                 try:
                     target = self.camera_manager.resolve_target(camera_id)
                 except Exception:
-                    pass
+                    self.stop_capture(camera_id)
+                    with self._lock:
+                        self.running[camera_id] = False
+                        self.capture_threads.pop(camera_id, None)
+                    break
                 continue
 
             # Successful open — reset open-failure counter
@@ -85,6 +103,8 @@ class VideoCapture:
 
             while self.running.get(camera_id, False):
                 ret, frame = cap.read()
+                if not self.running.get(camera_id, False):
+                    break
                 if not ret:
                     if is_local_file:
                         # Seamless loop for local video files
@@ -117,34 +137,59 @@ class VideoCapture:
                 time.sleep(0.03)   # approx 30 fps
 
             cap.release()
+            if not self.running.get(camera_id, False):
+                break
             # Brief pause so FFmpeg TLS teardown can complete before reopening
             time.sleep(0.5)
 
             try:
                 target = self.camera_manager.resolve_target(camera_id)
             except Exception:
-                time.sleep(1.0)
+                self.stop_capture(camera_id)
+                with self._lock:
+                    self.running[camera_id] = False
+                    self.capture_threads.pop(camera_id, None)
+                break
 
+        with self._lock:
+            self.running[camera_id] = False
+            self.capture_threads.pop(camera_id, None)
         logger.info(f"[VideoCapture] Capture stopped for {camera_id}")
 
     def start_capture(self, camera_id):
-        """Begin threaded video capture."""
-        try:
-            self.camera_manager.connect_camera(camera_id)
-        except Exception:
-            pass
-        thread = threading.Thread(
-            target=self._capture_loop,
-            args=(camera_id, None),
-            daemon=True,
-        )
-        self.capture_threads[camera_id] = thread
-        thread.start()
+        """Begin threaded video capture safely with thread synchronization."""
+        with self._lock:
+            if self.running.get(camera_id):
+                logger.info(f"[VideoCapture] Capture thread already active for {camera_id}")
+                return
+            if str(camera_id) not in self.camera_manager.camera_sources:
+                return
+            self.running[camera_id] = True
+            if camera_id not in self.frame_buffers:
+                self.frame_buffers[camera_id] = queue.Queue(maxsize=self.buffer_size)
+            try:
+                self.camera_manager.connect_camera(camera_id)
+            except Exception:
+                pass
+            thread = threading.Thread(
+                target=self._capture_loop,
+                args=(camera_id, None),
+                daemon=True,
+            )
+            self.capture_threads[camera_id] = thread
+            thread.start()
 
     def stop_capture(self, camera_id):
-        """Stop capture and disconnect camera."""
-        self.running[camera_id] = False
-        self.camera_manager.disconnect_camera(camera_id)
+        """Stop capture and disconnect camera safely with thread synchronization."""
+        with self._lock:
+            if not self.running.get(camera_id, False):
+                return
+            self.running[camera_id] = False
+            try:
+                self.camera_manager.disconnect_camera(camera_id)
+            except Exception:
+                pass
+            self.capture_threads.pop(camera_id, None)
 
     def get_frame(self, camera_id):
         """Fetch the latest frame from buffer (non-blocking)."""

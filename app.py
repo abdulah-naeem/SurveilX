@@ -4,6 +4,7 @@ from fastapi import Request, Response, Depends  # early import for type usage be
 from fastapi import FastAPI, HTTPException
 import secrets
 
+
 SESSIONS: Dict[str, Dict[str, str]] = {}
 DISABLED_AI_CAMERAS: Set[str] = set()
 
@@ -411,8 +412,8 @@ def _refresh_cameras_from_db():
         # embeddings remain lazy; do not create embed_tasks here
     # Stop captures for cameras removed from DB
     existing_ids = set(str(c.id) for c in cams)
-    for cid, running in list(video_capture.running.items()):
-        if running and cid not in existing_ids:
+    for cid in list(video_capture.running.keys()) + list(DETECTIONS.keys()):
+        if cid not in existing_ids:
             try:
                 video_capture.stop_capture(cid)
             except Exception:
@@ -424,6 +425,9 @@ def _refresh_cameras_from_db():
                     pass
                 embed_tasks.pop(cid, None)
             extractors.pop(cid, None)
+            DETECTIONS.pop(cid, None)
+            CAM_EMBED_FPS.pop(cid, None)
+            VIEWERS.pop(cid, None)
 
 @app.on_event("startup")
 async def startup_event():
@@ -774,6 +778,8 @@ async def stream_camera(camera_id: str):
         
         VIEWERS[cid] = VIEWERS.get(cid, 0) + 1
         while True:
+            if not video_capture.running.get(cid):
+                break
             frame = video_capture.get_frame(camera_id)
             if frame is None:
                 await asyncio.sleep(0.03)
@@ -1042,10 +1048,9 @@ async def admin_create_camera(payload: Dict, role: str = Depends(require_admin))
         except Exception:
             embed_fps = 15.0
 
-    loop = asyncio.get_running_loop()
-    cam = await loop.run_in_executor(_ADMIN_POOL, lambda: db_manager.create_camera(
+    cam = db_manager.create_camera(
         name=name, source_url=source_url, zone=zone, enabled=enabled, embed_fps=embed_fps
-    ))
+    )
 
     # reflect source and embed_fps in runtime maps; start capture if enabled (embeddings lazy)
     try:
@@ -1070,15 +1075,14 @@ async def admin_update_camera(camera_id: int, payload: Dict, role: str = Depends
     # Track old source to detect changes
     old_source = cam_manager.get_source(cid)
 
-    loop = asyncio.get_running_loop()
-    cam = await loop.run_in_executor(_ADMIN_POOL, lambda: db_manager.update_camera(
+    cam = db_manager.update_camera(
         camera_id,
         name=payload.get("name"),
         source_url=payload.get("source_url"),
         zone=payload.get("zone"),
         enabled=payload.get("enabled"),
         embed_fps=payload.get("embed_fps")
-    ))
+    )
     
     if not cam:
         raise HTTPException(status_code=404, detail="camera not found")
@@ -1127,13 +1131,13 @@ async def admin_update_camera(camera_id: int, payload: Dict, role: str = Depends
 
 @app.delete("/admin/cameras/{camera_id}")
 async def admin_delete_camera(camera_id: int, role: str = Depends(require_admin)):
-    loop = asyncio.get_running_loop()
-    ok = await loop.run_in_executor(_ADMIN_POOL, db_manager.delete_camera, camera_id)
+    ok = db_manager.delete_camera(camera_id)
     if not ok:
         raise HTTPException(status_code=404, detail="camera not found")
     # reflect in runtime
     try:
         cid = str(camera_id)
+        cam_manager.remove_source(camera_id)
         if video_capture.running.get(cid):
             video_capture.stop_capture(cid)
         if cid in embed_tasks:
@@ -1142,8 +1146,10 @@ async def admin_delete_camera(camera_id: int, role: str = Depends(require_admin)
             except Exception:
                 pass
             embed_tasks.pop(cid, None)
-            extractors.pop(cid, None)
-        cam_manager.remove_source(camera_id)
+        extractors.pop(cid, None)
+        DETECTIONS.pop(cid, None)
+        CAM_EMBED_FPS.pop(cid, None)
+        VIEWERS.pop(cid, None)
     except Exception:
         pass
     return {"ok": True}

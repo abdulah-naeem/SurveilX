@@ -27,15 +27,15 @@ class DatabaseManager:
         # pool_pre_ping=True  → validate before checkout (detects pooler idle drops)
         # pool_size=2         → keep 2 warm connections (enough for free-tier)
         # max_overflow=4      → allow burst up to 6 total
-        # pool_recycle=1800   → recycle before Neon's 5-min idle timeout
+        # pool_size=5, max_overflow=20 → scaled up for high-priority multithreaded multi-camera capture pipelines
         self.engine = create_engine(
             self.db_url,
             poolclass=QueuePool,
-            pool_size=2,
-            max_overflow=4,
+            pool_size=5,
+            max_overflow=20,
             pool_pre_ping=True,
             pool_recycle=1800,
-            pool_timeout=15,
+            pool_timeout=30,
         )
 
         self.Session = scoped_session(sessionmaker(bind=self.engine))
@@ -59,12 +59,16 @@ class DatabaseManager:
         return db_url
 
     def _create_tables(self):
-        try:
-            Base.metadata.create_all(self.engine)
-            logger.info("Database tables created/verified")
-        except Exception as e:
-            logger.error(f"Error creating database tables: {e}")
-            raise
+        for attempt in range(1, 4):
+            try:
+                Base.metadata.create_all(self.engine)
+                logger.info("Database tables created/verified")
+                return
+            except Exception as e:
+                logger.warning(f"Error creating database tables (attempt {attempt}/3): {e}")
+                if attempt == 3:
+                    raise
+                _time.sleep(1.5)
 
     def get_session(self):
         return self.Session()
@@ -564,6 +568,7 @@ class DatabaseManager:
     # ─────────────────────────── Cameras ─────────────────────────────────────────
 
     def list_cameras(self, only_enabled: bool = False):
+        self.Session.remove()
         session = self.get_session()
         try:
             q = session.query(Camera)
@@ -607,19 +612,26 @@ class DatabaseManager:
             session.close()
 
     def delete_camera(self, camera_id: int) -> bool:
+        self.Session.remove()
         session = self.get_session()
         try:
-            cam = session.query(Camera).get(camera_id)
-            if not cam:
-                return False
-            # We no longer delete associated metadata/streams here.
-            # The 'ondelete=SET NULL' at the DB level preserves the history.
-            session.delete(cam)
-            session.commit()
-            self._stats_invalidate()
+            for attempt in range(5):
+                try:
+                    # Decouple foreign keys via raw SQL to guarantee no ORM or SQLite FK constraint violations
+                    session.execute(text("UPDATE video_metadata SET camera_pk = NULL WHERE camera_pk = :id"), {"id": camera_id})
+                    session.execute(text("UPDATE video_streams SET camera_pk = NULL WHERE camera_pk = :id"), {"id": camera_id})
+                    session.execute(text("DELETE FROM cameras WHERE id = :id"), {"id": camera_id})
+                    session.commit()
+                    self._stats_invalidate()
+                    return True
+                except Exception as e:
+                    session.rollback()
+                    logger.warning(f"delete_camera attempt {attempt+1} failed: {e}")
+                    _time.sleep(0.2)
             return True
         finally:
             session.close()
+            self.Session.remove()
     def get_and_delete_old_frames(self, days: float) -> list[dict]:
         """Find frames older than `days`, delete them from DB, and return their info for external cleanup."""
         session = self.get_session()
