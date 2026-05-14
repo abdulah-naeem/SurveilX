@@ -29,7 +29,10 @@ report/
 scratch/
 chroma_db/
 uploads/
-models/
+# Track lightweight inference models natively for cloud build runners (Size < 17MB)
+# models/
+# Exclude massive local CLIP safetensors (>100MB) since code auto-downloads them from HF online
+models/clip-vit-base-patch32/
 config/demo/
 data/processed/
 data/temp_clips/
