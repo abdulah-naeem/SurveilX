@@ -107,12 +107,9 @@ class VideoCapture:
                     break
                 if not ret:
                     if is_local_file:
-                        # Seamless loop for local video files
-                        try:
-                            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                            continue
-                        except Exception:
-                            pass
+                        # Seamless loop for local video files: cleanly reopen file handle to guarantee pristine Linux FFmpeg demuxer seek state
+                        logger.info(f"[VideoCapture] Local video file stream loop finished for cam={camera_id}, re-initializing loop")
+                        break
 
                     read_fail_count += 1
                     if read_fail_count == 1 or read_fail_count % self._LOG_EVERY_N_FAILS == 0:

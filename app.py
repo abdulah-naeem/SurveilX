@@ -1222,8 +1222,9 @@ async def admin_upload_video(file: UploadFile = File(...), role: str = Depends(r
         i += 1
     data = await file.read()
     dest.write_bytes(data)
-    # Return absolute path so backend can open file
-    return {"path": str(dest.resolve())}
+    # Return clean, reliable relative path to ensure cross-platform stream robustness inside containerized environments
+    rel_path = f"uploads/{dest.name}"
+    return {"path": rel_path, "abs_path": str(dest.resolve())}
 
 # ---- Admin: Probe available capture devices (indices) ----
 @app.get("/admin/devices")
