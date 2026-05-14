@@ -49,6 +49,7 @@ class CameraManager:
             "ignoreerrors": True,
             "nocheckcertificate": True,
             "socket_timeout": 15,
+            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
         }
         if cookie_path:
             ydl_opts["cookiefile"] = cookie_path

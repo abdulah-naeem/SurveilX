@@ -64,7 +64,7 @@ def create_mp4_from_frames(frame_sources: list, output_path: str, fps: float = 1
         fourcc = cv2.VideoWriter_fourcc(*"H264")
         out = cv2.VideoWriter(output_path, cv2.CAP_MSMF, fourcc, fps, (width, height))
     else:
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        fourcc = cv2.VideoWriter_fourcc(*"avc1")
         out = cv2.VideoWriter(output_path, cv2.CAP_ANY, fourcc, fps, (width, height))
 
     if not out.isOpened():

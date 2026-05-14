@@ -10,6 +10,15 @@ DISABLED_AI_CAMERAS: Set[str] = set()
 
 app = FastAPI(title="SurveilX Web")
 
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 @app.on_event("startup")
 async def startup_event():
     import torch
