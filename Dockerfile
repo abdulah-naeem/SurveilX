@@ -6,12 +6,12 @@ RUN apt-get update && apt-get install -y \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Create a dedicated user to avoid running container as root (ZeroGPU requirement)
-RUN useradd -m -u 1000 user
-USER user
-ENV PATH="/home/user/.local/bin:$PATH"
+# Create a dedicated user and grant absolute workspace ownership to prevent Errno 13 Permission Denied crashes
+RUN useradd -m -u 1000 user && mkdir -p /app && chown -R user:user /app
 
 WORKDIR /app
+USER user
+ENV PATH="/home/user/.local/bin:$PATH"
 
 # Install Python dependencies first to leverage Docker layer caching
 COPY --chown=user:user requirements.txt .

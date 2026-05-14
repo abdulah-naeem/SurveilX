@@ -34,9 +34,7 @@ uploads/
 # Exclude massive local CLIP safetensors (>100MB) since code auto-downloads them from HF online
 models/clip-vit-base-patch32/
 config/demo/
-data/processed/
 data/temp_clips/
-data/output/
 *.zip
 *.rar
 *.log
