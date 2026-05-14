@@ -189,7 +189,9 @@ class DatabaseManager:
     def list_settings(self):
         session = self.get_session()
         try:
-            return session.query(GlobalSetting).all()
+            res = session.query(GlobalSetting).all()
+            session.expunge_all()
+            return res
         finally:
             session.close()
 
@@ -568,13 +570,14 @@ class DatabaseManager:
     # ─────────────────────────── Cameras ─────────────────────────────────────────
 
     def list_cameras(self, only_enabled: bool = False):
-        self.Session.remove()
         session = self.get_session()
         try:
             q = session.query(Camera)
             if only_enabled:
                 q = q.filter(Camera.enabled == True)
-            return q.all()
+            res = q.all()
+            session.expunge_all()
+            return res
         finally:
             session.close()
 

@@ -156,7 +156,7 @@ async def auth_login(payload: Dict[str, str], response: Response):
     token = secrets.token_urlsafe(32)
     SESSIONS[token] = {"username": username, "role": role}
     # Also set HttpOnly cookie for convenience
-    response.set_cookie(key="auth", value=token, httponly=True, secure=False, samesite="lax")
+    response.set_cookie(key="auth", value=token, httponly=True, secure=True, samesite="none")
     return {"token": token, "role": role}
 
 async def perform_logout_reset():
@@ -374,6 +374,18 @@ _IO_POOL = _TPE(max_workers=64, thread_name_prefix="surveilx-io")
 # This ensures that admin changes are processed immediately, even if the IO_POOL is saturated with frame uploads.
 _ADMIN_POOL = _TPE(max_workers=16, thread_name_prefix="surveilx-admin")
 
+MAIN_LOOP: Optional[asyncio.AbstractEventLoop] = None
+
+def _safe_create_task(coro):
+    """Safely schedules a coroutine from either an async context or synchronous worker thread."""
+    try:
+        loop = asyncio.get_running_loop()
+        return asyncio.create_task(coro)
+    except RuntimeError:
+        if MAIN_LOOP and MAIN_LOOP.is_running():
+            return asyncio.run_coroutine_threadsafe(coro, MAIN_LOOP)
+        return None
+
 def _run_in_pool(fn, *args):
     """Submit fn(*args) to the shared I/O pool; returns a concurrent.futures.Future."""
     return _IO_POOL.submit(fn, *args)
@@ -406,7 +418,9 @@ def _refresh_cameras_from_db():
             if cid not in extractors:
                 extractors[cid] = MetadataExtractor(cid)
             if cid not in embed_tasks:
-                embed_tasks[cid] = asyncio.create_task(capture_worker(cid))
+                task_obj = _safe_create_task(capture_worker(cid))
+                if task_obj:
+                    embed_tasks[cid] = task_obj
         except Exception:
             logger.warning(f"Failed to start camera {cid}")
         # embeddings remain lazy; do not create embed_tasks here
@@ -431,6 +445,8 @@ def _refresh_cameras_from_db():
 
 @app.on_event("startup")
 async def startup_event():
+    global MAIN_LOOP
+    MAIN_LOOP = asyncio.get_running_loop()
     # Seed default users if they don't exist
     try:
         db_manager.ensure_default_users()
@@ -718,14 +734,10 @@ async def index(request: Request):
     if not tok or tok not in SESSIONS:
         # redirect to static login page
         return RedirectResponse(url="/static/login-user.html", status_code=302)
-    try:
-        with open(os.path.join(WEB_DIR, "index.html"), "r", encoding="utf-8") as f:
-            return HTMLResponse(f.read())
-    except FileNotFoundError:
-        return HTMLResponse("<h3>UI not found</h3>")
+    return RedirectResponse(url="/static/index.html", status_code=302)
 
 @app.get("/cameras")
-async def list_cameras():
+def list_cameras():
     try:
         cams = db_manager.list_cameras(only_enabled=True)
         out = [{"id": str(c.id), "name": c.name or str(c.id)} for c in cams]
@@ -740,7 +752,9 @@ async def list_cameras():
             if cid not in extractors:
                 extractors[cid] = MetadataExtractor(cid)
             if cid not in embed_tasks:
-                embed_tasks[cid] = asyncio.create_task(capture_worker(cid))
+                task_obj = _safe_create_task(capture_worker(cid))
+                if task_obj:
+                    embed_tasks[cid] = task_obj
     except Exception:
         out = []
     return JSONResponse({"cameras": out})
@@ -864,7 +878,7 @@ async def stream_logs(role: str = Depends(require_admin)):
 
 # -------- Admin: Users management --------
 @app.get("/admin/users")
-async def admin_list_users(role: str = Depends(require_admin)):
+def admin_list_users(role: str = Depends(require_admin)):
     sess = db_manager.get_session()
     try:
         from src.metadata.models import AuthUser
@@ -950,7 +964,7 @@ async def admin_force_logout(payload: Dict[str, str], role: str = Depends(requir
 
 # -------- Admin: Analytics summary --------
 @app.get("/admin/analytics/summary")
-async def admin_analytics_summary(role: str = Depends(require_admin)):
+def admin_analytics_summary(role: str = Depends(require_admin)):
     from src.metadata.models import VideoMetadata, VideoStream
     sess = db_manager.get_session()
     try:
@@ -990,7 +1004,7 @@ async def admin_health(role: str = Depends(require_any_role)):
 
 # -------- Admin: Cameras CRUD --------
 @app.get("/admin/cameras")
-async def admin_list_cameras(role: str = Depends(require_admin)):
+def admin_list_cameras(role: str = Depends(require_admin)):
     cams = db_manager.list_cameras()
     return {"cameras": [
         {"id": c.id, "name": c.name, "source_url": c.source_url, "zone": c.zone, "enabled": c.enabled}
@@ -998,7 +1012,7 @@ async def admin_list_cameras(role: str = Depends(require_admin)):
     ]}
 
 @app.get("/api/system/limits")
-async def system_limits(role: str = Depends(require_any_role)):
+def system_limits(role: str = Depends(require_any_role)):
     """Return camera capacity info so the UI can disable the Add Camera button when at limit."""
     try:
         max_cams = int(db_manager.get_setting("max_cameras", "3") or 3)
@@ -1016,7 +1030,7 @@ async def system_limits(role: str = Depends(require_any_role)):
     }
 
 @app.post("/admin/cameras")
-async def admin_create_camera(payload: Dict, role: str = Depends(require_admin)):
+def admin_create_camera(payload: Dict, role: str = Depends(require_admin)):
     name = (payload.get("name") or "").strip()
     source_url = (payload.get("source_url") or "").strip()
     zone = (payload.get("zone") or "").strip() or None
@@ -1070,7 +1084,7 @@ async def admin_create_camera(payload: Dict, role: str = Depends(require_admin))
     return {"ok": True, "camera": {"id": cam.id, "name": cam.name, "source_url": cam.source_url, "zone": cam.zone, "enabled": cam.enabled}}
 
 @app.patch("/admin/cameras/{camera_id}")
-async def admin_update_camera(camera_id: int, payload: Dict, role: str = Depends(require_admin)):
+def admin_update_camera(camera_id: int, payload: Dict, role: str = Depends(require_admin)):
     cid = str(camera_id)
     # Track old source to detect changes
     old_source = cam_manager.get_source(cid)
@@ -1130,7 +1144,7 @@ async def admin_update_camera(camera_id: int, payload: Dict, role: str = Depends
     return {"ok": True}
 
 @app.delete("/admin/cameras/{camera_id}")
-async def admin_delete_camera(camera_id: int, role: str = Depends(require_admin)):
+def admin_delete_camera(camera_id: int, role: str = Depends(require_admin)):
     ok = db_manager.delete_camera(camera_id)
     if not ok:
         raise HTTPException(status_code=404, detail="camera not found")
@@ -1155,17 +1169,17 @@ async def admin_delete_camera(camera_id: int, role: str = Depends(require_admin)
     return {"ok": True}
 
 @app.post("/admin/cameras/{camera_id}/test")
-async def admin_test_camera(camera_id: int, role: str = Depends(require_admin)):
+def admin_test_camera(camera_id: int, role: str = Depends(require_admin)):
     # Lightweight placeholder test
     return {"ok": True}
 
 @app.get("/api/detections")
-async def api_detections(role: str = Depends(require_any_role)):
+def api_detections(role: str = Depends(require_any_role)):
     """Return latest detection per camera for dashboard."""
     return {"detections": {k: {kk: vv for kk, vv in v.items() if kk != "overlay_jpeg"} for k, v in DETECTIONS.items()}}
 
 @app.post("/api/cameras/{camera_id}/toggle_ai")
-async def toggle_camera_ai(camera_id: str, payload: Dict[str, Any], role: str = Depends(require_any_role)):
+def toggle_camera_ai(camera_id: str, payload: Dict[str, Any], role: str = Depends(require_any_role)):
     enable = payload.get("enabled", True)
     cid = str(camera_id)
     if enable:
@@ -1204,7 +1218,7 @@ async def admin_upload_video(file: UploadFile = File(...), role: str = Depends(r
 
 # ---- Admin: Probe available capture devices (indices) ----
 @app.get("/admin/devices")
-async def admin_list_devices(role: str = Depends(require_admin)):
+def admin_list_devices(role: str = Depends(require_admin)):
     import cv2
     found = []
     seen = set()
@@ -1268,7 +1282,7 @@ async def admin_delete_user(payload: Dict[str, str], role: str = Depends(require
 
 # -------- Events feed (any authenticated) --------
 @app.get("/events/feed")
-async def events_feed(limit: int = 20, role: str = Depends(require_any_role)):
+def events_feed(limit: int = 20, role: str = Depends(require_any_role)):
     from src.metadata.models import VideoMetadata
     sess = db_manager.get_session()
     try:
@@ -1290,7 +1304,7 @@ async def events_feed(limit: int = 20, role: str = Depends(require_any_role)):
 
 # -------- Map cameras (any authenticated) --------
 @app.get("/map/cameras")
-async def map_cameras(role: str = Depends(require_any_role)):
+def map_cameras(role: str = Depends(require_any_role)):
     cams = []
     try:
         for c in db_manager.list_cameras(only_enabled=True):
@@ -1305,7 +1319,7 @@ async def map_cameras(role: str = Depends(require_any_role)):
 
 # -------- Admin: Global Settings --------
 @app.get("/api/admin/settings")
-async def admin_get_settings(role: str = Depends(require_admin)):
+def admin_get_settings(role: str = Depends(require_admin)):
     settings_list = db_manager.list_settings()
     return {"settings": [
         {"key": s.key, "value": s.value, "description": s.description, "updated_at": str(s.updated_at)}
@@ -1322,7 +1336,7 @@ async def admin_update_settings(payload: Dict[str, str], role: str = Depends(req
 # -------- Chroma-backed embedding/search endpoints --------
 
 @app.get("/api/embeddings/stats")
-async def embeddings_stats(role: str = Depends(require_any_role)):
+def embeddings_stats(role: str = Depends(require_any_role)):
     """Return total frame count stored in Chroma."""
     try:
         from src.vector_store.chroma_store import get_collection
@@ -1334,7 +1348,7 @@ async def embeddings_stats(role: str = Depends(require_any_role)):
 
 
 @app.get("/api/debug/detection")
-async def debug_detection(role: str = Depends(require_admin)):
+def debug_detection(role: str = Depends(require_admin)):
     """Admin-only: show live detection state, demo-patch match, and last detections."""
     import time as _t
     out = {"cameras": {}, "detections": dict(DETECTIONS), "demo_loaded": False}

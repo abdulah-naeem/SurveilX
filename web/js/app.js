@@ -217,7 +217,10 @@ function startHeartbeat() {
         try {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 2000);
-            const res = await fetch('/auth/me', { method: 'HEAD', signal: controller.signal });
+            const headers = {};
+            const tok = localStorage.getItem('authToken');
+            if (tok) headers['Authorization'] = 'Bearer ' + tok;
+            const res = await fetch('/auth/me', { method: 'HEAD', headers, signal: controller.signal });
             clearTimeout(timeoutId);
 
             if (res.status === 401) {
@@ -1124,7 +1127,7 @@ function renderSimilarResults(data, minPct) {
         cap.className = 'cap';
         cap.style.marginTop = '6px';
         const ts  = item.timestamp_iso ? formatTimestamp(item.timestamp_iso) : '';
-        const simTxt = typeof pct === 'number' ? `<span style="color:var(--success);font-size:11px">${pct.toFixed(1)}% match</span>` : '';
+        const simTxt = (typeof pct === 'number' && !data.query) ? `<span style="color:var(--success);font-size:11px">${pct.toFixed(1)}% match</span>` : '';
         const lblTxt = item.violence_label && item.violence_label !== 'Normal'
             ? `<span class="pill pill-error" style="font-size:10px">${item.violence_label}</span> `
             : '';
@@ -1604,6 +1607,7 @@ async function loadAdminCameras() {
                 runAsyncAction(btn, async () => {
                     await fetchJSON(`/admin/cameras/${cam.id}`, { method: 'DELETE' });
                     loadAdminCameras();
+                    loadCameras();
                 }, 'Removing...');
             });
 
@@ -1815,6 +1819,7 @@ function openCameraModal({ title, init = {}, onSubmit }) {
             await onSubmit(payload);
             closeModal();
             loadAdminCameras();
+            loadCameras();
         }, 'Saving...');
     };
 }

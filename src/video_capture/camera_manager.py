@@ -20,34 +20,89 @@ class CameraManager:
     def _resolve_youtube_url(self, youtube_url):
         """Return a direct video stream URL for OpenCV."""
         # Prefer a progressive MP4 (single file) over HLS to reduce read failures
-        ydl_opts = {"quiet": True, "noplaylist": True, "no_warnings": True}
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(youtube_url, download=False)
-            # Try to pick best progressive mp4
-            fmts = info.get("formats") or []
-            best = None
-            for f in fmts:
-                v = (f.get("vcodec") or "none").lower()
-                a = (f.get("acodec") or "none").lower()
-                ext = (f.get("ext") or "").lower()
-                url = f.get("url") or ""
-                if ext == "mp4" and v != "none" and a != "none" and url.startswith("http"):
-                    # choose the highest resolution by width/height/bitrate heuristics
-                    if best is None:
-                        best = f
-                    else:
-                        b_w = best.get("width") or 0
-                        b_h = best.get("height") or 0
-                        b_tbr = best.get("tbr") or 0
+        cookie_path = None
+        
+        # 1. Check for secure Hugging Face Space Secret injection (Hidden from public views)
+        env_cookies = os.getenv("YOUTUBE_COOKIES")
+        if env_cookies and env_cookies.strip():
+            try:
+                # Store locally in ephemeral container storage hidden from public git/files access
+                tmp_path = "/tmp/youtube_hidden_cookies.txt"
+                with open(tmp_path, "w") as f:
+                    f.write(env_cookies)
+                cookie_path = tmp_path
+            except Exception:
+                pass
+
+        # 2. Fallback to physical repository paths if local/private
+        if not cookie_path:
+            for p in ["cookies.txt", "config/cookies.txt"]:
+                if os.path.exists(p):
+                    cookie_path = p
+                    break
+
+        ydl_opts = {
+            "quiet": True, 
+            "noplaylist": True, 
+            "no_warnings": True,
+            "format": "best/b/bestvideo+bestaudio/bv+ba",
+            "ignoreerrors": True,
+            "nocheckcertificate": True,
+            "socket_timeout": 15,
+        }
+        if cookie_path:
+            ydl_opts["cookiefile"] = cookie_path
+
+        max_retries = 2
+        import time
+        for attempt in range(max_retries + 1):
+            try:
+                with YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(youtube_url, download=False)
+                    if not info:
+                        if attempt < max_retries:
+                            time.sleep(1.0)
+                            continue
+                        return ""
+                    
+                    fmts = info.get("formats") or []
+                    best_mp4 = None
+                    best_hls = None
+                    
+                    for f in fmts:
+                        v = (f.get("vcodec") or "none").lower()
+                        a = (f.get("acodec") or "none").lower()
+                        ext = (f.get("ext") or "").lower()
+                        proto = (f.get("protocol") or "").lower()
+                        url = f.get("url") or ""
+                        
+                        if not url.startswith("http"):
+                            continue
+                        
                         w = f.get("width") or 0
                         h = f.get("height") or 0
                         tbr = f.get("tbr") or 0
-                        if (w, h, tbr) > (b_w, b_h, b_tbr):
-                            best = f
-            if best and best.get("url"):
-                return best["url"]
-            # Fallback to the generic URL (may be HLS)
-            return info.get("url") or youtube_url
+                        
+                        # Target 1: Progressive MP4
+                        if ext == "mp4" and v != "none" and a != "none":
+                            if best_mp4 is None or (w, h, tbr) > (best_mp4.get("width") or 0, best_mp4.get("height") or 0, best_mp4.get("tbr") or 0):
+                                best_mp4 = f
+                        # Target 2: Live Stream HLS / m3u8
+                        elif "m3u8" in proto or ext == "mp4":
+                            if best_hls is None or (w, h, tbr) > (best_hls.get("width") or 0, best_hls.get("height") or 0, best_hls.get("tbr") or 0):
+                                best_hls = f
+
+                    selected = best_mp4 or best_hls
+                    if selected and selected.get("url"):
+                        return selected["url"]
+                    
+                    return info.get("url") or ""
+            except Exception as e:
+                if attempt < max_retries and ("ssl" in str(e).lower() or "eof" in str(e).lower()):
+                    time.sleep(1.5)
+                    continue
+                print(f"[CameraManager] YouTube stream resolution failed for {youtube_url} (attempt {attempt+1}): {e}")
+                return ""
 
     def _is_youtube(self, url: str) -> bool:
         u = (url or '').lower()

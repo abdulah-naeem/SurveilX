@@ -20,8 +20,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy remaining source code and models
 COPY --chown=user:user . .
 
-# Hugging Face Spaces exclusively forwards external traffic to port 7860
+# Expose standard default port mapping
 EXPOSE 7860
 
-# Launch application on port 7860
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]
+# Launch application dynamically binding to cloud-allocated network ports ($PORT) or defaulting to 7860
+CMD uvicorn app:app --host 0.0.0.0 --port ${PORT:-7860}
