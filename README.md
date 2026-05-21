@@ -92,15 +92,19 @@ source venv/bin/activate  # On Windows: .\venv\Scripts\activate
 # Install dependencies
 pip install -r requirements.txt
 ```
+### 3. Model Weights
+The deep learning model weights for real-time violence detection are excluded from Git. 
+- Place your trained `cnn_lstm_fusion.pth` file inside the `models/` directory.
+- If the model weights are missing, the system will automatically run in **Demo / Simulation Mode** (described below).
 
-### 3. Configuration
+### 4. Configuration
 Copy `.env.example` to `.env` and fill in your credentials:
 ```bash
 cp .env.example .env
 ```
 *Required: `SURVEILX_DB_URL`, `CLOUDINARY_*`, `CHROMA_HOST`.*
 
-### 4. Running the Application
+### 5. Running the Application
 ```bash
 # Start the web server
 uvicorn app:app --host 0.0.0.0 --port 8000

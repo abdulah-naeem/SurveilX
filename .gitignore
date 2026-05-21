@@ -29,10 +29,8 @@ report/
 scratch/
 chroma_db/
 uploads/
-# Track lightweight inference models natively for cloud build runners (Size < 17MB)
-# models/
-# Exclude massive local CLIP safetensors (>100MB) since code auto-downloads them from HF online
-models/clip-vit-base-patch32/
+# Exclude deep learning model weights
+models/
 config/demo/
 data/temp_clips/
 *.zip
@@ -48,5 +46,6 @@ Thumbs.db
 desktop.ini
 
 # Demo configs
-demo.json
-
+script.json
+vercel.json
+scratch_append.py
