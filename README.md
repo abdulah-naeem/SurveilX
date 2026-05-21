@@ -29,15 +29,35 @@
 ## 🏗️ Architecture
 
 ```mermaid
-graph TD
-    A[Camera Feeds] -->|OpenCV| B(Capture Worker)
-    B -->|Frames| C{Storage Pipeline}
-    C -->|Async Upload| D[Cloudinary]
-    C -->|Metadata| E[Neon Postgres]
-    C -->|Embeddings| F[ChromaDB]
-    G[Web Dashboard] -->|NLP Query| F
-    G -->|Analytics| E
-    G -->|Video Clip| D
+flowchart TD
+    %% Node Definitions
+    A{{"📹 Camera Feeds (RTSP / YouTube)"}}:::source
+    B(["⚙️ Capture Worker (Multithreaded)"]):::worker
+    C{"⚡ Storage & Processing Pipeline"}:::pipeline
+    D["☁️ Cloudinary (Frame CDN)"]:::storage
+    E[("🐘 Neon Postgres (SQL Metadata)")]:::storage
+    F[("📚 ChromaDB (CLIP Vectors)")]:::storage
+    G["💻 Web Dashboard (Admin/User UI)"]:::client
+
+    %% Connections
+    A -->|OpenCV| B
+    B -->|Frames| C
+    C -->|Async Upload| D
+    C -->|Metadata| E
+    C -->|Embeddings| F
+    G -->|NLP Semantic Query| F
+    G -->|Analytics & History| E
+    G -->|Video Clips| D
+
+    %% Color & Styling Configuration
+    classDef source fill:#e1f5fe,stroke:#0288d1,stroke-width:2px,color:#01579b;
+    classDef worker fill:#ede7f6,stroke:#7e57c2,stroke-width:2px,color:#4a148c;
+    classDef pipeline fill:#fff3e0,stroke:#f57c00,stroke-width:2px,color:#e65100;
+    classDef storage fill:#efebe9,stroke:#6d4c41,stroke-width:2px,color:#3e2723;
+    classDef client fill:#e8f5e9,stroke:#388e3c,stroke-width:2px,color:#1b5e20;
+
+    %% Link Styling
+    linkStyle 0,1,2,3,4,5,6,7 stroke:#b0bec5,stroke-width:2px,stroke-dasharray: 0;
 ```
 
 ---
@@ -87,6 +107,11 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 Visit `http://localhost:8000` to access the dashboard.
 
+### 🎬 Demo & Simulation Mode
+If the main deep learning model weights (`models/`) are not found, SurveilX automatically falls back to **Demo / Simulation Mode**:
+- In this mode, the system simulates real-time violence detection alerts using pre-defined event intervals specified in `config/demo/script.json`.
+- You can customize the simulated alert timelines (labels, start, and end times in seconds) for YouTube camera streams by editing the JSON configurations in `config/demo/script.json`.
+
 ---
 
 ## 📂 Directory Structure
@@ -94,7 +119,7 @@ Visit `http://localhost:8000` to access the dashboard.
 - `app.py`: Main FastAPI entry point and async workers.
 - `src/`: Core logic modules (capture, processing, metadata).
 - `web/`: Modern dashboard frontend (static assets).
-- `config/`: System settings and environment management.
+- `config/`: System settings, database connections, and simulated event timelines (`config/demo/`).
 - `models/`: Placeholder for AI model weights (excluded from git).
 - `data/`: Temporary storage for processed frames/clips (excluded from git).
 

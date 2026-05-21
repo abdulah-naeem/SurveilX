@@ -30,10 +30,16 @@ class VideoCapture:
         self.frame_buffers = {}
         self.capture_threads = {}
         self.running = {}
+        self.latest_frames = {}
+        self.frame_counters = {}
         self._lock = threading.RLock()
 
     def _capture_loop(self, camera_id, _initial_unused):
         with self._lock:
+            if camera_id not in self.latest_frames:
+                self.latest_frames[camera_id] = None
+            if camera_id not in self.frame_counters:
+                self.frame_counters[camera_id] = 0
             frame_queue = self.frame_buffers.get(camera_id)
             if not frame_queue:
                 frame_queue = queue.Queue(maxsize=self.buffer_size)
@@ -99,28 +105,48 @@ class VideoCapture:
             read_fail_count = 0
 
             src = self.camera_manager.get_source(camera_id) or ""
-            is_local_file = self.camera_manager._is_file(src)
+            is_local_file = self.camera_manager._is_file(src) or (isinstance(target, str) and self.camera_manager._is_file(target))
+            norm_url = src.strip().lower()
+            is_demo = "youtube.com" in norm_url or "youtu.be" in norm_url or "uploads/" in norm_url or "demo" in norm_url
+
+            # Get video properties for time calculation and rate regulation
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if not fps or fps <= 0.01 or fps > 100.0:
+                fps = 30.0
+
+            frame_count_total = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+            is_file_like = (frame_count_total > 0) or is_local_file or is_demo
+
+            frames_in_loop = 0
+            loop_start = time.time()
 
             while self.running.get(camera_id, False):
                 ret, frame = cap.read()
                 if not self.running.get(camera_id, False):
                     break
+                
                 if not ret:
-                    if is_local_file:
-                        # Seamless loop for local video files: cleanly reopen file handle to guarantee pristine Linux FFmpeg demuxer seek state
-                        logger.info(f"[VideoCapture] Local video file stream loop finished for cam={camera_id}, re-initializing loop")
-                        break
-
-                    read_fail_count += 1
-                    if read_fail_count == 1 or read_fail_count % self._LOG_EVERY_N_FAILS == 0:
-                        logger.warning(
-                            f"[VideoCapture] Read failed for cam={camera_id} "
-                            f"(consecutive={read_fail_count}), reopening stream"
-                        )
-                    break   # exits inner loop → outer loop reopens
+                    logger.info(f"[VideoCapture] Video stream loop finished for cam={camera_id}, re-initializing loop by reopening")
+                    break
 
                 # Successful read — reset read-failure counter
                 read_fail_count = 0
+                frames_in_loop += 1
+
+                # Calculate video_time of this frame reliably using frames_in_loop / fps for files/demos
+                if is_file_like:
+                    video_time = frames_in_loop / fps
+                else:
+                    pos_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
+                    if pos_msec > 0:
+                        video_time = pos_msec / 1000.0
+                    else:
+                        video_time = frames_in_loop / fps
+
+                with self._lock:
+                    next_id = self.frame_counters.get(camera_id, 0) + 1
+                    self.frame_counters[camera_id] = next_id
+                    self.latest_frames[camera_id] = (frame, next_id, video_time)
 
                 if frame_queue.full():
                     try:
@@ -131,13 +157,25 @@ class VideoCapture:
                     frame_queue.put_nowait(frame)
                 except Exception:
                     pass
-                time.sleep(0.03)   # approx 30 fps
+
+                # Regulation of frame rate
+                if is_file_like:
+                    expected_time = loop_start + (frames_in_loop / fps)
+                    now = time.time()
+                    sleep_dur = expected_time - now
+                    if sleep_dur > 0:
+                        time.sleep(sleep_dur)
+                    else:
+                        time.sleep(0.001)  # Yield CPU control slightly
+                else:
+                    time.sleep(0.001)  # Non-blocking yield for live cameras
 
             cap.release()
             if not self.running.get(camera_id, False):
                 break
-            # Brief pause so FFmpeg TLS teardown can complete before reopening
-            time.sleep(0.5)
+            # Brief pause so FFmpeg TLS teardown can complete before reopening (only for network streams)
+            if not is_local_file and not is_demo:
+                time.sleep(0.5)
 
             try:
                 target = self.camera_manager.resolve_target(camera_id)
@@ -150,15 +188,31 @@ class VideoCapture:
 
         with self._lock:
             self.running[camera_id] = False
-            self.capture_threads.pop(camera_id, None)
+            if self.capture_threads.get(camera_id) == threading.current_thread():
+                self.capture_threads.pop(camera_id, None)
         logger.info(f"[VideoCapture] Capture stopped for {camera_id}")
 
     def start_capture(self, camera_id):
         """Begin threaded video capture safely with thread synchronization."""
         with self._lock:
-            if self.running.get(camera_id):
-                logger.info(f"[VideoCapture] Capture thread already active for {camera_id}")
-                return
+            old_thread = self.capture_threads.get(camera_id)
+            if old_thread and old_thread.is_alive():
+                if self.running.get(camera_id):
+                    logger.info(f"[VideoCapture] Capture thread already active for {camera_id}")
+                    return
+                logger.info(f"[VideoCapture] Waiting for old capture thread of {camera_id} to exit...")
+                self._lock.release()
+                try:
+                    old_thread.join(timeout=5.0)
+                except Exception as join_err:
+                    logger.warning(f"[VideoCapture] Error joining old thread: {join_err}")
+                finally:
+                    self._lock.acquire()
+                
+                if old_thread.is_alive():
+                    logger.warning(f"[VideoCapture] Old capture thread for {camera_id} is still alive. Refusing to spawn duplicate thread to prevent frame shuffling.")
+                    return
+
             if str(camera_id) not in self.camera_manager.camera_sources:
                 return
             self.running[camera_id] = True
@@ -186,10 +240,29 @@ class VideoCapture:
                 self.camera_manager.disconnect_camera(camera_id)
             except Exception:
                 pass
-            self.capture_threads.pop(camera_id, None)
 
-    def get_frame(self, camera_id):
-        """Fetch the latest frame from buffer (non-blocking)."""
+    def get_frame(self, camera_id, last_id=None):
+        """Fetch the latest frame from buffer (non-blocking).
+        If last_id is provided, returns (frame, frame_id, video_time) if a newer frame exists,
+        otherwise returns (None, last_id, 0.0). If last_id is None, falls back to
+        the traditional queue-based destructive fetch.
+        """
+        if last_id is not None:
+            with self._lock:
+                data = self.latest_frames.get(camera_id)
+                if not data:
+                    return None, last_id, 0.0
+                if len(data) == 3:
+                    frame, frame_id, video_time = data
+                else:
+                    frame, frame_id = data
+                    video_time = 0.0
+                
+                if frame_id <= last_id:
+                    return None, last_id, video_time
+                return frame, frame_id, video_time
+
+        # Fallback to queue-based destructive fetch
         buf = self.frame_buffers.get(camera_id)
         if buf and not buf.empty():
             return buf.get()

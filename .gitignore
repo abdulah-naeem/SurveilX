@@ -46,3 +46,7 @@ data/temp_clips/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Demo configs
+demo.json
+

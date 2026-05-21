@@ -159,7 +159,22 @@ class CameraManager:
                 return src[7:]
             return src
         # URL
-        return self._resolve_youtube_url(src) if self._is_youtube(src) else src
+        # Check cache first to avoid slow YoutubeDL resolution on loop restarts
+        import time
+        now = time.time()
+        if not hasattr(self, 'resolved_urls_cache'):
+            self.resolved_urls_cache = {}
+            
+        if camera_id in self.resolved_urls_cache:
+            cached_src, url_val, exp_time = self.resolved_urls_cache[camera_id]
+            if cached_src == src and exp_time > now:
+                return url_val
+
+        resolved = self._resolve_youtube_url(src) if self._is_youtube(src) else src
+        
+        # Cache for 2 hours (7200 seconds)
+        self.resolved_urls_cache[camera_id] = (src, resolved, now + 7200.0)
+        return resolved
 
     def get_video_capture_args(self, camera_id):
         """Return (target, apiPreference) for cv2.VideoCapture."""

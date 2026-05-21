@@ -421,6 +421,12 @@ def _refresh_cameras_from_db():
     active_ids = set(str(c.id) for c in cams if getattr(c, 'enabled', True))
     for cid in sorted(active_ids):
         try:
+            source_url = cam_manager.get_source(cid)
+            is_demo = detector and hasattr(detector, 'demo_results') and detector._normalize_url(source_url) in detector.demo_results
+            if is_demo:
+                logger.info(f"Skipping prewarm for demo camera {cid}")
+                continue
+
             if not video_capture.running.get(cid):
                 video_capture.start_capture(cid)
                 logger.info(f"Started camera {cid} (prewarm)")
@@ -528,6 +534,7 @@ async def capture_worker(camera_id: str):
 
     if camera_id not in extractors:
         extractors[camera_id] = MetadataExtractor(camera_id)
+    last_frame_id = -1
     while True:
         try:
             now = time.time()
@@ -535,11 +542,12 @@ async def capture_worker(camera_id: str):
             if (now - last_tick) < 0.066:
                 await asyncio.sleep(0.01)
                 continue
-            frame = video_capture.get_frame(camera_id)
+            frame, frame_id, video_time = video_capture.get_frame(camera_id, last_id=last_frame_id)
             last_tick = now
             if frame is None:
                 await asyncio.sleep(0.01)
                 continue
+            last_frame_id = frame_id
             detection = getattr(extractors[camera_id], 'last_detection', {})
             if str(camera_id) in DISABLED_AI_CAMERAS:
                 detection = {
@@ -554,6 +562,12 @@ async def capture_worker(camera_id: str):
                 source_url = cam_manager.get_source(camera_id)
                 # If it's a demo patch video, bypass the throttle (Real-time scripting)
                 is_patch = hasattr(detector, 'demo_results') and detector._normalize_url(source_url) in detector.demo_results
+
+                # If there are active viewers for a demo camera, the frame_generator handles the detection update in real-time.
+                # Skip running predict here to prevent race conditions and redundant overhead.
+                if is_patch and VIEWERS.get(str(camera_id), 0) > 0:
+                    await asyncio.sleep(0.01)
+                    continue
 
                 if (now - last_yolo_ts) >= 0.05 or is_patch:
                     extractors[camera_id].last_yolo_ts = now
@@ -571,8 +585,8 @@ async def capture_worker(camera_id: str):
                     try:
                         detection = await loop.run_in_executor(
                             _IO_POOL,
-                            lambda cam=camera_id, frm=frame, thr=_v_threshold, src=_src: \
-                                detector.predict(cam, frame_bgr=frm, confidence_threshold=thr, source_url=src)
+                            lambda cam=camera_id, frm=frame, thr=_v_threshold, src=_src, vt=video_time: \
+                                detector.predict(cam, frame_bgr=frm, confidence_threshold=thr, source_url=src, video_time=vt)
                         )
                         extractors[camera_id].last_detection = detection
                     except Exception as _det_err:
@@ -587,7 +601,8 @@ async def capture_worker(camera_id: str):
                     "class_probs": detection.get("class_probs"),
                     "ts": utc_iso(),
                     "is_alert": detection.get("is_alert", False),
-                    "ai_enabled": str(camera_id) not in DISABLED_AI_CAMERAS
+                    "ai_enabled": str(camera_id) not in DISABLED_AI_CAMERAS,
+                    "video_time": video_time
                 }
             except Exception:
                 pass
@@ -782,6 +797,17 @@ async def stream_camera(camera_id: str):
 
     # Ensure capture (and embedding worker) lazily start on first viewer
     cid = str(camera_id)
+    # Restart the camera capture loop if it's a demo camera and this is the first viewer
+    source_url = cam_manager.get_source(camera_id)
+    is_demo = detector and hasattr(detector, 'demo_results') and detector._normalize_url(source_url) in detector.demo_results
+    if is_demo and VIEWERS.get(cid, 0) == 0:
+        logger.info(f"Demo camera {cid} opened by first viewer. Restarting capture loop.")
+        try:
+            video_capture.stop_capture(cid)
+            await asyncio.sleep(0.2)
+        except Exception:
+            pass
+
     if not video_capture.running.get(cid):
         try:
             video_capture.start_capture(cid)
@@ -800,15 +826,41 @@ async def stream_camera(camera_id: str):
                 detector.reset_demo(cid)
         
         VIEWERS[cid] = VIEWERS.get(cid, 0) + 1
+        last_frame_id = -1
         while True:
             if not video_capture.running.get(cid):
                 break
-            frame = video_capture.get_frame(camera_id)
+            frame, frame_id, video_time = video_capture.get_frame(camera_id, last_id=last_frame_id)
             if frame is None:
-                await asyncio.sleep(0.03)
+                await asyncio.sleep(0.005)
                 continue
+            last_frame_id = frame_id
             
 
+
+            # If it's a demo/patched camera, predict right here on the correct video_time
+            source_url = cam_manager.get_source(camera_id)
+            is_demo = detector and hasattr(detector, 'demo_results') and detector._normalize_url(source_url) in detector.demo_results
+
+            det = {}
+            if is_demo:
+                try:
+                    thr = float(db_manager.get_setting("violence_threshold", "0.5") or 0.5)
+                except Exception:
+                    thr = 0.5
+                det = detector.predict(camera_id, frame, confidence_threshold=thr, source_url=source_url, video_time=video_time)
+                # Store immediately in DETECTIONS to synchronize state
+                DETECTIONS[cid] = {
+                    "label": det.get("label"),
+                    "score": det.get("score"),
+                    "class_probs": det.get("class_probs"),
+                    "ts": utc_iso(),
+                    "is_alert": det.get("is_alert", False),
+                    "ai_enabled": cid not in DISABLED_AI_CAMERAS,
+                    "video_time": video_time
+                }
+            else:
+                det = DETECTIONS.get(cid, {})
 
             # Overlay timestamp and camera location on the frame
             try:
@@ -830,7 +882,6 @@ async def stream_camera(camera_id: str):
                 cv2.putText(frame, line2, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2, cv2.LINE_AA)
                 
                 # Add Detection Results to Overlay
-                det = DETECTIONS.get(cid, {})
                 if det and det.get("label"):
                     lbl = str(det["label"])
                     scr = float(det.get("score") or 0)
@@ -841,7 +892,7 @@ async def stream_camera(camera_id: str):
                 pass
             ok, buf = cv2.imencode('.jpg', frame)
             if not ok:
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0.005)
                 continue
             jpg_bytes = buf.tobytes()
             yield (
@@ -850,7 +901,6 @@ async def stream_camera(camera_id: str):
                 b"Content-Length: " + str(len(jpg_bytes)).encode() + b"\r\n\r\n"
                 + jpg_bytes + b"\r\n"
             )
-            await asyncio.sleep(0.01) # Reduced for snappiness
 
     async def stream_with_teardown():
         try:
@@ -867,6 +917,39 @@ async def stream_camera(camera_id: str):
                     pass
 
     return StreamingResponse(stream_with_teardown(), media_type=f"multipart/x-mixed-replace; boundary={boundary}")
+
+@app.get("/snapshot/{camera_id}")
+def get_snapshot(camera_id: str):
+    # Retrieve the latest frame for this camera from video_capture
+    frame_data = video_capture.latest_frames.get(camera_id)
+    frame = None
+    if frame_data:
+        if len(frame_data) >= 1:
+            frame = frame_data[0]
+            
+    if frame is None:
+        # Generate a high-quality placeholder image
+        placeholder = np.zeros((180, 320, 3), dtype=np.uint8)
+        # Subtle slate dark background
+        placeholder[:] = (30, 24, 20)
+        # Add text labels
+        cams = {}
+        try:
+            cams = {str(c.id): c for c in db_manager.list_cameras(only_enabled=True)}
+        except Exception:
+            pass
+        cam_name = cams.get(camera_id).name if camera_id in cams else f"Camera {camera_id}"
+        cv2.putText(placeholder, cam_name, (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (148, 163, 184), 1, cv2.LINE_AA)
+        cv2.putText(placeholder, "STANDBY", (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (59, 130, 246), 2, cv2.LINE_AA)
+        ok, buf = cv2.imencode('.jpg', placeholder)
+        if not ok:
+            raise HTTPException(status_code=500, detail="Failed to encode placeholder")
+        return Response(content=buf.tobytes(), media_type="image/jpeg")
+        
+    ok, buf = cv2.imencode('.jpg', frame)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to encode frame")
+    return Response(content=buf.tobytes(), media_type="image/jpeg")
 
 @app.get("/logs")
 async def stream_logs(role: str = Depends(require_admin)):

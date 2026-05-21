@@ -81,6 +81,28 @@ function updateSidebarContext(tabId) {
     if (metric2ValueEl) metric2ValueEl.textContent = String(context.metric2Value());
 }
 
+// Shared global AudioContext to play sounds reliably on modern browsers after user interaction
+let sharedAudioCtx = null;
+let SYSTEM_SETTINGS = {
+    show_alert_popup: 'true',
+    timezone: 'UTC+0'
+};
+function initSharedAudioCtx() {
+    try {
+        if (!sharedAudioCtx) {
+            sharedAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (sharedAudioCtx && sharedAudioCtx.state === 'suspended') {
+            sharedAudioCtx.resume();
+        }
+    } catch (e) {
+        console.warn("Failed to initialize shared AudioContext:", e);
+    }
+}
+// Listen to common user interaction events to trigger context creation/resume
+document.addEventListener('click', initSharedAudioCtx, { passive: true });
+document.addEventListener('keydown', initSharedAudioCtx, { passive: true });
+
 // --- Alerts ---
 class AlertQueue {
     constructor() {
@@ -98,40 +120,65 @@ class AlertQueue {
     async process() {
         if (this.active || this.queue.length === 0) return;
         this.active = true;
-        const { msg, type } = this.queue.shift();
-
-        if (type === 'critical') {
-            this.playAlert();
-            showBigAlert(msg);
+        try {
+            const item = this.queue.shift();
+            if (item) {
+                const { msg, type } = item;
+                if (type === 'critical') {
+                    this.playAlert();
+                    showBigAlert(msg);
+                }
+                showToast(msg, type);
+            }
+        } catch (err) {
+            console.error("Error in AlertQueue.process:", err);
+        } finally {
+            await new Promise(r => setTimeout(r, 300));
+            this.active = false;
+            if (this.queue.length > 0) {
+                this.process();
+            }
         }
-
-        await showToast(msg, type);
-        this.active = false;
-        if (this.queue.length > 0) setTimeout(() => this.process(), 300);
     }
 
     playAlert() {
-        // Simple Audio Beep
-        if (!this.audioCtx) this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        if (this.audioCtx.state === 'suspended') this.audioCtx.resume();
+        try {
+            // Create a fresh AudioContext for each alert to guarantee it plays reliably
+            const ctx = new (window.AudioContext || window.webkitAudioContext)();
+            if (ctx.state === 'suspended') {
+                ctx.resume();
+            }
 
-        const osc = this.audioCtx.createOscillator();
-        const gain = this.audioCtx.createGain();
-        osc.connect(gain);
-        gain.connect(this.audioCtx.destination);
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
 
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(880, this.audioCtx.currentTime); // High pitch
-        osc.frequency.exponentialRampToValueAtTime(440, this.audioCtx.currentTime + 0.1);
+            osc.type = 'sawtooth';
+            // Schedule the sound slightly in the future to allow context startup
+            const startTime = ctx.currentTime + 0.05;
+            osc.frequency.setValueAtTime(880, startTime); 
+            osc.frequency.exponentialRampToValueAtTime(440, startTime + 0.15);
 
-        gain.gain.setValueAtTime(0.5, this.audioCtx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.01, this.audioCtx.currentTime + 0.5);
+            gain.gain.setValueAtTime(0.5, startTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, startTime + 0.45);
 
-        osc.start();
-        osc.stop(this.audioCtx.currentTime + 0.5);
+            osc.start(startTime);
+            osc.stop(startTime + 0.5);
+
+            // Close the context after the sound has finished to release audio hardware resources
+            setTimeout(() => {
+                try {
+                    ctx.close();
+                } catch (e) {}
+            }, 1000);
+        } catch (err) {
+            console.warn("Failed to play alert sound:", err);
+        }
     }
 }
 const ALERTS = new AlertQueue();
+const ALERTED_STATES = {};
 
 function showToast(msg, type = 'info') {
     return new Promise(resolve => {
@@ -185,8 +232,8 @@ function initApp() {
         window.initCustomVideoPage();
     }
 
-    // Polling Intervals
-    setInterval(fetchDetections, 2500);
+    // Polling Intervals (Faster polling to catch rapid normal-alert-normal state transitions on short looping videos)
+    setInterval(fetchDetections, 500);
     setInterval(loadCameras, 15000);
     setInterval(pollEmbeddings, 5000);
 
@@ -698,32 +745,48 @@ async function loadCameras() {
         const camsDiv = document.getElementById('cams');
         if (!camsDiv) return;
 
-        // Preserve scroll if possible or optimized re-render? For now full rebuild
-        // but we can optimize by checking diff. simpler to rebuild for now.
-        const currentScroll = camsDiv.scrollTop;
-
-        camsDiv.innerHTML = '';
         const cams = applySavedOrder(res.cameras || []);
         // Deduplicate by id in case backend returned duplicates
         const unique = Array.from(new Map(cams.map(c => [String(c.id), c])).values());
-        CAMS = unique;
 
-        const countEl = document.getElementById('cam-count');
-        if (countEl) countEl.textContent = `${unique.length} camera(s)`;
+        // Check if we actually need to rebuild
+        let needRebuild = false;
+        if (!window.PREVIOUS_CAMERAS || window.PREVIOUS_CAMERAS.length !== unique.length) {
+            needRebuild = true;
+        } else {
+            for (let i = 0; i < unique.length; i++) {
+                if (String(window.PREVIOUS_CAMERAS[i].id) !== String(unique[i].id) || 
+                    window.PREVIOUS_CAMERAS[i].name !== unique[i].name) {
+                    needRebuild = true;
+                    break;
+                }
+            }
+        }
 
-        populateDropdown(unique);
+        if (needRebuild) {
+            CAMS = unique;
+            window.PREVIOUS_CAMERAS = JSON.parse(JSON.stringify(unique));
 
-        unique.forEach(({ id, name }) => {
-            const card = createCameraCard(id, name);
-            camsDiv.appendChild(card);
-        });
+            const currentScroll = camsDiv.scrollTop;
+            camsDiv.innerHTML = '';
 
-        if (camsDiv.scrollTo) camsDiv.scrollTo(0, currentScroll);
+            const countEl = document.getElementById('cam-count');
+            if (countEl) countEl.textContent = `${unique.length} camera(s)`;
 
-        buildThumbbar(unique);
-        applyFocusFromDropdown();
-        applyViewMode();
-        renderDetectionTabs();
+            populateDropdown(unique);
+
+            unique.forEach(({ id, name }) => {
+                const card = createCameraCard(id, name);
+                camsDiv.appendChild(card);
+            });
+
+            if (camsDiv.scrollTo) camsDiv.scrollTo(0, currentScroll);
+
+            buildThumbbar(unique);
+            applyFocusFromDropdown();
+            applyViewMode();
+            renderDetectionTabs();
+        }
     } catch (e) {
         console.error('Failed to load cameras', e);
         const countEl = document.getElementById('cam-count');
@@ -778,7 +841,7 @@ function createCameraCard(id, name) {
     const img = document.createElement('img');
     img.src = `/stream/${id}`;
     img.alt = `Stream ${id}`;
-    img.loading = 'lazy'; // Performant loading
+    img.loading = 'eager'; // Eager load video stream to avoid connection drops
     img.title = 'Click to focus/fullscreen';
 
     img.addEventListener('click', () => {
@@ -952,23 +1015,61 @@ function applyFocusFromDropdown() {
         cards.forEach(c => {
             c.classList.remove('focused', 'dimmed', 'hidden');
             c.style.display = '';
+            
+            // Ensure visible cards have their stream src set
+            const img = c.querySelector('.frame img');
+            if (img) {
+                const camId = c.dataset.camId;
+                const expectedSrc = `/stream/${camId}`;
+                if (!img.src.endsWith(expectedSrc)) {
+                    img.src = expectedSrc;
+                }
+            }
         });
-        if (thumbbar) thumbbar.classList.add('hidden');
+        if (thumbbar) {
+            thumbbar.classList.add('hidden');
+            // Clear stream srcs in thumbbar if hidden to release connections
+            const thumbImgs = thumbbar.querySelectorAll('.thumb img');
+            thumbImgs.forEach(ti => {
+                ti.src = '';
+            });
+        }
         return;
     }
 
     // Single/Focus Mode
     let found = false;
     cards.forEach(c => {
-        const isTarget = String(c.dataset.camId) === String(selVal);
+        const camId = String(c.dataset.camId);
+        const isTarget = camId === String(selVal);
         c.classList.toggle('focused', isTarget);
         c.classList.toggle('dimmed', !isTarget);
         c.classList.toggle('hidden', !isTarget);
         c.style.display = isTarget ? '' : 'none';
+        
+        const img = c.querySelector('.frame img');
+        if (img) {
+            if (isTarget) {
+                const expectedSrc = `/stream/${camId}`;
+                if (!img.src.endsWith(expectedSrc)) {
+                    img.src = expectedSrc;
+                }
+            } else {
+                img.src = ''; // Stop streaming for hidden cameras!
+            }
+        }
         if (isTarget) found = true;
     });
 
-    if (thumbbar) thumbbar.classList.remove('hidden');
+    if (thumbbar) {
+        thumbbar.classList.remove('hidden');
+        // Set thumbnail images to snapshot or single frame with cache-buster
+        const thumbImgs = thumbbar.querySelectorAll('.thumb img');
+        thumbImgs.forEach(ti => {
+            const thumbCamId = ti.alt;
+            ti.src = `/snapshot/${thumbCamId}?t=` + Date.now();
+        });
+    }
 
     if (found) {
         const target = cards.find(c => c.dataset.camId === selVal);
@@ -1051,7 +1152,7 @@ function buildThumbbar(cams) {
         const t = document.createElement('div');
         t.className = 'thumb';
         const img = document.createElement('img');
-        img.src = `/stream/${id}`;
+        img.src = `/snapshot/${id}`;
         img.alt = id;
         const label = document.createElement('span');
         label.textContent = name || id;
@@ -1211,8 +1312,13 @@ let APP_TIMEZONE = 'UTC+0';
 async function refreshTimezone() {
     try {
         const settings = await fetchJSON('/api/admin/settings');
-        const tz = settings.settings.find(s => s.key === 'timezone');
-        if (tz) APP_TIMEZONE = tz.value;
+        if (settings && Array.isArray(settings.settings)) {
+            settings.settings.forEach(s => {
+                SYSTEM_SETTINGS[s.key] = s.value;
+            });
+        }
+        const tz = SYSTEM_SETTINGS['timezone'];
+        if (tz) APP_TIMEZONE = tz;
     } catch(e) {}
 }
 
@@ -1479,6 +1585,7 @@ async function loadAdminSettings() {
         if (!form) return;
         form.innerHTML = '';
         (data.settings || []).forEach(s => {
+            SYSTEM_SETTINGS[s.key] = s.value; // Cache here as well!
             if (s.key === 'detector_enabled') return; // Hide this setting completely as requested
             
             const isBool = s.value === 'true' || s.value === 'false';
@@ -1514,11 +1621,9 @@ async function updateAdminSettings() {
     const inputs = document.querySelectorAll('#settings-form input');
     const payload = {};
     inputs.forEach(i => {
-        if (i.type === 'checkbox') {
-            payload[i.dataset.key] = i.checked ? 'true' : 'false';
-        } else {
-            payload[i.dataset.key] = i.value;
-        }
+        const val = i.type === 'checkbox' ? (i.checked ? 'true' : 'false') : i.value;
+        payload[i.dataset.key] = val;
+        SYSTEM_SETTINGS[i.dataset.key] = val;
     });
 
     runAsyncAction(btn, async () => {
@@ -2027,19 +2132,43 @@ function updateDetectionBadges() {
 
         // Alert Trigger logic
         if (isAlert && label !== 'Normal') {
-            const lastState = c.dataset.alerted;
-            // Throttle alerts: only alert if state (label) changed OR it's been > 15s since last alert
-            // We use a simple timestamp check if storing ts in dataset
+            if (!ALERTED_STATES[id]) {
+                ALERTED_STATES[id] = { label: 'Normal', ts: 0, lastVideoTime: 0 };
+            }
+            
             const now = Date.now();
-            const lastTs = parseInt(c.dataset.alertTs || '0');
+            const currentVideoTime = typeof d.video_time === 'number' ? d.video_time : 0;
+            
+            console.log(`[AlertCheck] Cam: ${id}, Label: ${label}, Time: ${currentVideoTime}, LastTime: ${ALERTED_STATES[id].lastVideoTime}, LastState: ${ALERTED_STATES[id].label}`);
+
+            // Check if loop restarted (video time went backward)
+            if (currentVideoTime < ALERTED_STATES[id].lastVideoTime) {
+                console.log(`[AlertCheck] Loop restart detected for camera ${id} (Video time went backward: ${currentVideoTime} < ${ALERTED_STATES[id].lastVideoTime})`);
+                ALERTED_STATES[id].label = 'Normal'; // Reset alert state to allow triggering again on the new loop
+            }
+            ALERTED_STATES[id].lastVideoTime = currentVideoTime;
+
+            const lastState = ALERTED_STATES[id].label;
+            const lastTs = ALERTED_STATES[id].ts;
 
             if (label !== lastState || (now - lastTs > 15000)) {
                 const cam = CAMS.find(c => c.id == id);
                 const camName = cam ? (cam.name || id) : id;
+                console.log(`[AlertCheck] TRIGGERING ALERT: ${label} detected on ${camName}. (label !== lastState: ${label !== lastState}, dt: ${now - lastTs}ms)`);
                 ALERTS.add(`${label} detected on ${camName}`, 'critical');
-                c.dataset.alerted = label;
-                c.dataset.alertTs = now;
+                ALERTED_STATES[id].label = label;
+                ALERTED_STATES[id].ts = now;
             }
+        } else {
+            if (!ALERTED_STATES[id]) {
+                ALERTED_STATES[id] = { label: 'Normal', ts: 0, lastVideoTime: 0 };
+            }
+            const currentVideoTime = typeof d.video_time === 'number' ? d.video_time : 0;
+            if (ALERTED_STATES[id].label !== 'Normal') {
+                console.log(`[AlertCheck] Resetting alert state for camera ${id} to Normal`);
+            }
+            ALERTED_STATES[id].lastVideoTime = currentVideoTime;
+            ALERTED_STATES[id].label = 'Normal';
         }
     });
 }
@@ -2058,7 +2187,7 @@ function playAlertSound() {
 
 function showBigAlert(msg) {
     // Check if alert popup is disabled in settings
-    if (db_manager.get_setting("show_alert_popup", "true") !== "true") return;
+    if (SYSTEM_SETTINGS['show_alert_popup'] !== 'true') return;
 
     let mod = document.getElementById('alert-modal');
     if (!mod) {

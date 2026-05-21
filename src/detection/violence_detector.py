@@ -153,15 +153,14 @@ class ViolenceDetector:
         """Restart the timeline for a specific camera."""
         cam_id = str(camera_id)
         if cam_id in self._state:
-            self._state[cam_id]["start_time"] = time.time()
+            self._state[cam_id]["start_time"] = None
             self._state[cam_id]["frame_counter"] = 0
             print(f"[ViolenceDetector] Demo reset for camera {cam_id}")
 
     def reset_all_demos(self):
         """Restart all camera timelines (system-wide reset)."""
-        now = time.time()
         for cam_id in self._state:
-            self._state[cam_id]["start_time"] = now
+            self._state[cam_id]["start_time"] = None
             self._state[cam_id]["frame_counter"] = 0
         print("[ViolenceDetector] Global demo reset triggered.")
 
@@ -170,7 +169,7 @@ class ViolenceDetector:
         if cam_id not in self._state:
             self._state[cam_id] = {
                 "frame_counter": 0,
-                "start_time": time.time()
+                "start_time": None
             }
         return self._state[cam_id]
 
@@ -187,7 +186,8 @@ class ViolenceDetector:
         frame_bgr: np.ndarray,
         *,
         confidence_threshold: float = 0.5,
-        source_url: Optional[str] = None
+        source_url: Optional[str] = None,
+        video_time: Optional[float] = None
     ) -> Dict[str, Any]:
         """
         Run detection on a single frame while keeping per-camera temporal state,
@@ -199,18 +199,27 @@ class ViolenceDetector:
         norm_url = self._normalize_url(source_url) if source_url else None
 
         if norm_url and norm_url in self.demo_results:
-            elapsed = time.time() - state.get("start_time", time.time())
+            if video_time is not None:
+                elapsed = video_time + 0.2
+            else:
+                if state.get("start_time") is None:
+                    state["start_time"] = time.time()
+                elapsed = time.time() - state["start_time"] + 0.2
             intervals = self.demo_results[norm_url]
             
             # Find matching interval
             match = None
             if isinstance(intervals, list) and len(intervals) > 0:
                 max_end = max([int(i.get("end", 0)) for i in intervals])
-                if elapsed >= max_end:
-                    # Looping: Restart timeline
-                    state["start_time"] = time.time()
-                    elapsed = 0.0
-                    print(f"[ViolenceDetector] Looping demo for camera {camera_id}")
+                if video_time is not None:
+                    if elapsed >= max_end:
+                        elapsed = elapsed % max_end
+                else:
+                    if elapsed >= max_end:
+                        # Looping: Restart timeline
+                        state["start_time"] = time.time()
+                        elapsed = 0.2
+                        print(f"[ViolenceDetector] Looping demo for camera {camera_id}")
 
                 for interval in intervals:
                     if interval.get("start", 0) <= elapsed < interval.get("end", 999999):

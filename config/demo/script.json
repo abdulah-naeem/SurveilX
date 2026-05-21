@@ -187,5 +187,45 @@
       "score": 0.83
     }
   ],
+  "https://www.youtube.com/watch?v=Nh_Do42lVy4": [
+    {
+      "start": 0,
+      "end": 24,
+      "label": "Normal",
+      "score": 0.84
+    },
+    {
+      "start": 24,
+      "end": 27,
+      "label": "Pre-Violence",
+      "score": 0.85
+    },
+    {
+      "start": 27,
+      "end": 53,
+      "label": "Fighting",
+      "score": 0.80
+    }
+  ],
+  "https://www.youtube.com/watch?v=ExhErHYlkFU": [
+    {
+      "start": 0,
+      "end": 4,
+      "label": "Normal",
+      "score": 0.84
+    },
+    {
+      "start": 4,
+      "end": 8,
+      "label": "Pre-Violence",
+      "score": 0.81
+    },
+    {
+      "start": 8,
+      "end": 31,
+      "label": "Fighting",
+      "score": 0.83
+    }
+  ],
   "--- INSTRUCTIONS ---": "Add up to 10 video URLs as keys. 'start' and 'end' are in seconds relative to when the camera started."
 }
