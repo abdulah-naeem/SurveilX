@@ -17,6 +17,7 @@ let VIEW_MODE = localStorage.getItem('viewMode') || 'grid'; // 'grid' | 'single'
 let OVERLAY_VISIBLE = localStorage.getItem(OVERLAY_KEY) !== 'false'; // Default TRUE
 let SIDEBAR_FOLDED = localStorage.getItem(SIDEBAR_KEY) === 'true'; // Default FALSE
 let SHOW_CONFIDENCES = localStorage.getItem('showConfidences') !== 'false'; // Default TRUE
+let SHOW_ALERTS = localStorage.getItem('showAlerts') !== 'false'; // Default TRUE
 const LOGS = []; // Legacy placeholder, UI removed
 
 const SIDEBAR_CONTEXTS = {
@@ -125,8 +126,11 @@ class AlertQueue {
             if (item) {
                 const { msg, type } = item;
                 if (type === 'critical') {
-                    this.playAlert();
-                    showBigAlert(msg);
+                    const alertsEnabled = (SYSTEM_SETTINGS['show_alert_popup'] === 'true' && SHOW_ALERTS);
+                    if (alertsEnabled) {
+                        this.playAlert();
+                        showBigAlert(msg);
+                    }
                 }
                 showToast(msg, type);
             }
@@ -194,7 +198,27 @@ function showToast(msg, type = 'info') {
         el.innerHTML = `
             <div class="toast-icon">${type === 'critical' ? '🚨' : 'ℹ️'}</div>
             <div class="toast-body">${msg}</div>
+            <button class="toast-close" aria-label="Close notification">&times;</button>
         `;
+
+        const closeBtn = el.querySelector('.toast-close');
+        let dismissed = false;
+        const dismiss = () => {
+            if (dismissed) return;
+            dismissed = true;
+            el.classList.remove('show');
+            setTimeout(() => {
+                el.remove();
+                resolve();
+            }, 300);
+        };
+
+        if (closeBtn) {
+            closeBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                dismiss();
+            });
+        }
 
         container.appendChild(el);
 
@@ -202,13 +226,7 @@ function showToast(msg, type = 'info') {
         el.offsetHeight;
         el.classList.add('show');
 
-        setTimeout(() => {
-            el.classList.remove('show');
-            setTimeout(() => {
-                el.remove();
-                resolve();
-            }, 300);
-        }, 5000); // 5 seconds display
+        setTimeout(dismiss, 5000); // 5 seconds display
     });
 }
 
@@ -511,6 +529,17 @@ function bindGlobalEvents() {
             localStorage.setItem('showConfidences', SHOW_CONFIDENCES);
             updateDetectionBadges();
             showToast(`Confidence stats ${SHOW_CONFIDENCES ? 'shown' : 'hidden'}`, 'info');
+        });
+    }
+
+    // Alerts Toggle
+    const alertsToggle = document.getElementById('alerts-toggle');
+    if (alertsToggle) {
+        alertsToggle.checked = SHOW_ALERTS;
+        alertsToggle.addEventListener('change', () => {
+            SHOW_ALERTS = alertsToggle.checked;
+            localStorage.setItem('showAlerts', SHOW_ALERTS);
+            showToast(`Critical alerts ${SHOW_ALERTS ? 'enabled' : 'muted'}`, 'info');
         });
     }
 
@@ -1311,7 +1340,7 @@ function renderSimilarResults(data, minPct) {
 let APP_TIMEZONE = 'UTC+0';
 async function refreshTimezone() {
     try {
-        const settings = await fetchJSON('/api/admin/settings');
+        const settings = await fetchJSON('/api/settings');
         if (settings && Array.isArray(settings.settings)) {
             settings.settings.forEach(s => {
                 SYSTEM_SETTINGS[s.key] = s.value;

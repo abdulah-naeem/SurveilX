@@ -314,6 +314,23 @@ class DatabaseManager:
         finally:
             session.close()
 
+    def _parse_timezone_offset(self, tz_str: str) -> float:
+        """Parses timezone offset like UTC+5, UTC-3, UTC+05:30 into float hours."""
+        if not tz_str:
+            return 0.0
+        import re
+        # Match e.g. UTC+5, UTC-3, UTC+05:30, UTC-04:00, etc.
+        match = re.search(r'UTC([+-])(\d+)(?::(\d+))?', tz_str, re.IGNORECASE)
+        if not match:
+            # Check for generic offsets like +5, -3
+            match = re.search(r'([+-])(\d+)(?::(\d+))?', tz_str)
+        if match:
+            sign = 1.0 if match.group(1) == '+' else -1.0
+            hours = float(match.group(2))
+            minutes = float(match.group(3)) if match.group(3) else 0.0
+            return sign * (hours + minutes / 60.0)
+        return 0.0
+
     def get_events_stats(self, hours: int = 24):
         """Returns aggregated stats for charts. Cached for 30s."""
         ck = f"events_stats_{hours}"
@@ -335,7 +352,9 @@ class DatabaseManager:
                     VideoMetadata.violence_label,
                     VideoMetadata.timestamp,
                     VideoMetadata.camera_pk,
+                    VideoStream.camera_id,
                 )
+                .outerjoin(VideoStream, VideoMetadata.video_stream_id == VideoStream.id)
                 .filter(VideoMetadata.timestamp >= since)
                 .filter(VideoMetadata.violence_label.isnot(None))
                 .order_by(VideoMetadata.timestamp.asc())
@@ -349,7 +368,7 @@ class DatabaseManager:
                 lbl = row.violence_label or "Normal"
                 if lbl == "Initializing...":
                     continue
-                cid = str(row.camera_pk)
+                cid = row.camera_id or (str(row.camera_pk) if row.camera_pk is not None else "None")
                 ts  = row.timestamp
 
                 if cid in active_events and active_events[cid]['label'] == lbl:
@@ -366,13 +385,19 @@ class DatabaseManager:
             for s in active_events.values():
                 sequences.append(s)
 
-            now = utcnow()
+            # Get configured timezone offset and apply it to chart bins and sequences
+            tz_str = self.get_setting("timezone", "UTC+0")
+            offset_hours = self._parse_timezone_offset(tz_str)
+            tz_offset = timedelta(hours=offset_hours)
+
+            now = utcnow() + tz_offset
             by_time = {(now - timedelta(hours=i)).strftime("%H:00"): {} for i in range(hours)}
             by_type: dict = {}
 
             for s in sequences:
                 lbl = s['label']
-                h   = s['start_ts'].strftime("%H:00")
+                local_start_ts = s['start_ts'] + tz_offset
+                h   = local_start_ts.strftime("%H:00")
                 if h in by_time:
                     by_time[h][lbl] = by_time[h].get(lbl, 0) + 1
                 by_type[lbl] = by_type.get(lbl, 0) + 1
@@ -409,7 +434,9 @@ class DatabaseManager:
                     VideoMetadata.violence_score,
                     VideoMetadata.timestamp,
                     VideoMetadata.camera_pk,
+                    VideoStream.camera_id,
                 )
+                .outerjoin(VideoStream, VideoMetadata.video_stream_id == VideoStream.id)
                 .filter(VideoMetadata.timestamp >= since)
                 .filter(VideoMetadata.violence_label.isnot(None))
                 .filter(VideoMetadata.violence_label != "Normal")
@@ -430,7 +457,7 @@ class DatabaseManager:
                 lbl  = r.violence_label
                 conf = r.violence_score or 0.0
                 ts   = r.timestamp
-                cid  = str(r.camera_pk)
+                cid  = r.camera_id or (str(r.camera_pk) if r.camera_pk is not None else "None")
 
                 if cid in active_events:
                     curr = active_events[cid]
@@ -623,15 +650,15 @@ class DatabaseManager:
                     # Decouple foreign keys via raw SQL to guarantee no ORM or SQLite FK constraint violations
                     session.execute(text("UPDATE video_metadata SET camera_pk = NULL WHERE camera_pk = :id"), {"id": camera_id})
                     session.execute(text("UPDATE video_streams SET camera_pk = NULL WHERE camera_pk = :id"), {"id": camera_id})
-                    session.execute(text("DELETE FROM cameras WHERE id = :id"), {"id": camera_id})
+                    res = session.execute(text("DELETE FROM cameras WHERE id = :id"), {"id": camera_id})
                     session.commit()
                     self._stats_invalidate()
-                    return True
+                    return res.rowcount > 0
                 except Exception as e:
                     session.rollback()
                     logger.warning(f"delete_camera attempt {attempt+1} failed: {e}")
                     _time.sleep(0.2)
-            return True
+            return False
         finally:
             session.close()
             self.Session.remove()

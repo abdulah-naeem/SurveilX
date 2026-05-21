@@ -1410,6 +1410,15 @@ def map_cameras(role: str = Depends(require_any_role)):
         ]
     return {"cameras": cams}
 
+# -------- General: Global Settings (any authenticated role) --------
+@app.get("/api/settings")
+def get_settings(role: str = Depends(require_any_role)):
+    settings_list = db_manager.list_settings()
+    return {"settings": [
+        {"key": s.key, "value": s.value, "description": s.description, "updated_at": str(s.updated_at)}
+        for s in settings_list
+    ]}
+
 # -------- Admin: Global Settings --------
 @app.get("/api/admin/settings")
 def admin_get_settings(role: str = Depends(require_admin)):

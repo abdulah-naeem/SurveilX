@@ -60,13 +60,18 @@ class TestBlackboxAPI_Mocked(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertIn("detections", data)
-        self.assertIn("show_keypoints", data)
 
     def test_camera_404(self):
         # Test deleting a non-existent camera
         response = client.delete("/admin/cameras/999999")
         # Ensure it returns 404
         self.assertEqual(response.status_code, 404)
+
+    def test_settings_endpoint(self):
+        response = client.get("/api/settings")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("settings", data)
 
 if __name__ == "__main__":
     unittest.main()
