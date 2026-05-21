@@ -95,7 +95,6 @@ pip install -r requirements.txt
 ### 3. Model Weights
 The deep learning model weights for real-time violence detection are excluded from Git. 
 - Place your trained `cnn_lstm_fusion.pth` file inside the `models/` directory.
-- If the model weights are missing, the system will automatically run in **Demo / Simulation Mode** (described below).
 
 ### 4. Configuration
 Copy `.env.example` to `.env` and fill in your credentials:
@@ -111,11 +110,6 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 Visit `http://localhost:8000` to access the dashboard.
 
-### 🎬 Demo & Simulation Mode
-If the main deep learning model weights (`models/`) are not found, SurveilX automatically falls back to **Demo / Simulation Mode**:
-- In this mode, the system simulates real-time violence detection alerts using pre-defined event intervals specified in `config/demo/script.json`.
-- You can customize the simulated alert timelines (labels, start, and end times in seconds) for YouTube camera streams by editing the JSON configurations in `config/demo/script.json`.
-
 ---
 
 ## 📂 Directory Structure
@@ -123,7 +117,7 @@ If the main deep learning model weights (`models/`) are not found, SurveilX auto
 - `app.py`: Main FastAPI entry point and async workers.
 - `src/`: Core logic modules (capture, processing, metadata).
 - `web/`: Modern dashboard frontend (static assets).
-- `config/`: System settings, database connections, and simulated event timelines (`config/demo/`).
+- `config/`: System settings and database configurations.
 - `models/`: Placeholder for AI model weights (excluded from git).
 - `data/`: Temporary storage for processed frames/clips (excluded from git).
 
