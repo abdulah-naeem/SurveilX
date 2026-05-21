@@ -5,10 +5,17 @@
 [![OpenCV](https://img.shields.io/badge/OpenCV-5C3EE8?logo=opencv&logoColor=white)](https://opencv.org/)
 [![ChromaDB](https://img.shields.io/badge/VectorDB-Chroma-yellow)](https://www.trychroma.com/)
 [![Cloudinary](https://img.shields.io/badge/Storage-Cloudinary-blue)](https://cloudinary.com/)
+[![Video Demo](https://img.shields.io/badge/Demo-Watch%20Video-red?logo=youtube&logoColor=white)](https://drive.google.com/file/d/1xydf_ACBelTZVlwrQtYnzrymYgcM7oWu/view?usp=sharing)
 
 **SurveilX** is a next-generation surveillance dashboard that combines real-time computer vision, NLP-based semantic search, and high-performance video processing. Designed for scalability and speed, it transforms raw video feeds into actionable intelligence.
 
 > **Portfolio Note:** Developed collaboratively as part of university FYP.
+
+---
+
+## 🎬 Video Demo
+
+Watch the system in action here: **[SurveilX Video Demonstration](https://drive.google.com/file/d/1xydf_ACBelTZVlwrQtYnzrymYgcM7oWu/view?usp=sharing)**
 
 ---
 
